@@ -1,0 +1,91 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ── Virtual environments ──
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+.env
+
+# ── IDE & Editor ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.vim/
+.emacs.d/
+
+# ── Testing & Coverage ──
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.cover
+.hypothesis/
+
+# ── Build artifacts ──
+dist-pkg/
+*.pkg.tar.zst
+build/
+*.spec
+
+# ── Local config (secrets, auth tokens) ──
+.env.local
+.env.*.local
+config.local.json
+secrets.json
+
+# ── Qt & GUI ──
+*.qmlc
+*.jsc
+moc_*.cpp
+ui_*.py
+
+# ── Temporary files ──
+*.tmp
+*.bak
+*.log
+.#*
+*~
+
+# ── OS-specific ──
+.DS_Store
+Thumbs.db
+.gitkeep
+
+# ── Project-specific cache ──
+~/.config/maze-ai/cache/
+~/.config/maze-ai/history.json.bak
+
+# ── Lock files (optional: uncomment if you want to exclude them) ──
+# Pipfile.lock
+# poetry.lock

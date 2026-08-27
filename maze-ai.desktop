@@ -1,0 +1,31 @@
+[Desktop Entry]
+Type=Application
+Name=Maze AI
+GenericName=AI Assistant
+Comment=Agentic AI assistant for Maze Linux — local models via Ollama
+Exec=maze-ai
+Icon=maze-ai
+Terminal=false
+Categories=Utility;Development;
+Keywords=AI;Assistant;Ollama;Gemini;Agent;Maze;
+StartupNotify=true
+StartupWMClass=maze-ai
+Actions=quickask;clipboard;screenshot;
+
+[Desktop Action quickask]
+Name=Quick Ask
+Name[tr]=Hızlı sor
+Exec=maze-ai --ask
+Icon=maze-ai
+
+[Desktop Action clipboard]
+Name=Ask about the clipboard
+Name[tr]=Panodakini sor
+Exec=maze-ai --clipboard
+Icon=maze-ai
+
+[Desktop Action screenshot]
+Name=Ask about a screen area
+Name[tr]=Ekrandan bir alanı sor
+Exec=maze-ai --screenshot
+Icon=maze-ai
