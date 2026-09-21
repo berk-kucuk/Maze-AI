@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "TOOLS", "ToolResult", "ToolSpec", "SIDE_EFFECT_TOOLS", "EGRESS_TOOLS",
-    "SENSITIVE_TOOLS",
+    "SENSITIVE_TOOLS", "SCREEN_TOOLS", "IMPERSONATION_TOOLS", "TooLargeToBackUp",
     "tool_schemas", "PROTOCOL_SCHEMA", "TOOL_GROUPS", "tools_for_groups",
     "is_dangerous_command", "is_readonly_command", "is_sensitive_path",
     "looks_like_exfiltration", "touches_sensitive_path", "check_url",
@@ -60,6 +60,22 @@ SIDE_EFFECT_TOOLS = {
 # sensitive-path check can't see it. They are confirmed like any other access to
 # secrets while "guard_secrets" is on.
 SENSITIVE_TOOLS = {"recent_commands"}
+
+# Tools that photograph the screen. These are reads, but the most privacy-
+# sensitive reads in the whole set: whatever happens to be on screen — a
+# password manager, a bank page, someone's messages — is captured wholesale and
+# handed to the model, which on a hosted backend means it leaves the machine.
+# Reading ~/.ssh/id_rsa already needs approval; a photograph of the terminal
+# displaying that same key must not be the way around it.
+#
+# capture_region is not in TOOLS — it is reached through screenshot(region=True)
+# — but it is listed anyway so the rule already covers it if that ever changes.
+SCREEN_TOOLS = {"screenshot", "capture_region", "read_screen", "read_window"}
+
+# Tools that put something in front of the user under Maze AI's name. A
+# notification the assistant did not mean to send is a phishing surface: people
+# trust a message from their own assistant more than one from a web page.
+IMPERSONATION_TOOLS = {"notify"}
 
 # Tools that reach out to the network with a model-chosen destination. These
 # are the exfiltration channel a prompt-injected page would try to use, so they
@@ -145,8 +161,32 @@ _BACKUP_DIR = (
     / "maze-ai" / "backups"
 )
 _BACKUP_INDEX = _BACKUP_DIR / "index.json"
-MAX_BACKUP_BYTES = 20_000_000   # don't copy huge files just to allow an undo
-MAX_BACKUPS = 200               # keep the index (and the folder) bounded
+MAX_BACKUP_BYTES = 200_000_000  # biggest single item worth copying for an undo
+#: How long backups are kept, and how much room they may take in total. Age and
+#: size rather than a count: "keep the last 200" quietly makes a deletion from
+#: last week unrecoverable as soon as a busy afternoon fills the list.
+BACKUP_RETENTION_DAYS = 30
+MAX_BACKUP_TOTAL_BYTES = 2_000_000_000
+#: Deletions are kept this many times longer than edits. An edit's old version
+#: is a convenience; a deleted file's copy is the file.
+DELETE_RETENTION_FACTOR = 2
+
+
+class TooLargeToBackUp(Exception):
+    """The item is bigger than the backup store will take.
+
+    Raised rather than returned because every caller has the same duty: stop.
+    "I could not back it up, so I deleted it anyway" is the exact failure this
+    prevents.
+    """
+
+    def __init__(self, path: Path, size: int) -> None:
+        super().__init__(
+            f"{path} is {size // 1_000_000} MB, over the {MAX_BACKUP_BYTES // 1_000_000} MB "
+            "backup limit, so this could not be undone."
+        )
+        self.path = path
+        self.size = size
 
 
 def _read_backup_index() -> list[dict]:
@@ -157,38 +197,96 @@ def _read_backup_index() -> list[dict]:
         return []
 
 
-def _backup(path: Path) -> str:
-    """Snapshot a file before it is overwritten or deleted.
+def _measure(path: Path) -> int:
+    """Bytes ``path`` occupies, giving up once it is over the limit.
 
-    Returns a short note for the tool output ("" when nothing was copied).
-    Failures are never fatal: a missing backup must not block the edit the user
-    asked for, it just means there is nothing to undo.
+    Walking a huge tree just to report a number we already know is too big
+    would stall the tool call waiting on the answer.
+    """
+    if path.is_file() and not path.is_symlink():
+        return path.stat().st_size
+    total = 0
+    for root, _dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            try:
+                total += (Path(root) / name).lstat().st_size
+            except OSError:
+                continue
+            if total > MAX_BACKUP_BYTES:
+                return total
+    return total
+
+
+def _prune_backups(index: list[dict]) -> list[dict]:
+    """Drop entries that are too old or push the store over its size cap."""
+    now = time.time()
+    edit_ttl = BACKUP_RETENTION_DAYS * 86400
+    delete_ttl = edit_ttl * DELETE_RETENTION_FACTOR
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for entry in index:
+        ttl = delete_ttl if entry.get("op") == "delete" else edit_ttl
+        if now - float(entry.get("time") or 0) > ttl:
+            dropped.append(entry)
+        else:
+            kept.append(entry)
+
+    total = sum(int(e.get("size") or 0) for e in kept)
+    while total > MAX_BACKUP_TOTAL_BYTES and kept:
+        oldest = kept.pop(0)
+        total -= int(oldest.get("size") or 0)
+        dropped.append(oldest)
+
+    for entry in dropped:
+        target = Path(entry.get("backup", ""))
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        except OSError:
+            pass
+    return kept
+
+
+def _backup(path: Path, op: str = "write") -> str:
+    """Snapshot ``path`` before it is overwritten or destroyed.
+
+    Handles directories as well as files — deleting a tree used to be the one
+    genuinely unrecoverable operation here, because rmtree ran with nothing
+    kept. Returns a short note for the tool output ("" when there was nothing
+    to copy).
+
+    Raises :class:`TooLargeToBackUp` when the item will not fit. Callers must
+    let that through rather than carrying on: proceeding past a failed backup
+    is what turns "too big to copy" into "gone for good".
     """
     try:
-        if not path.is_file():
+        if not path.exists() or (path.is_symlink() and not path.is_dir()):
             return ""
-        size = path.stat().st_size
+        size = _measure(path)
         if size > MAX_BACKUP_BYTES:
-            return " (too large to back up)"
+            raise TooLargeToBackUp(path, size)
+
         _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         dest = _BACKUP_DIR / f"{stamp}-{path.name}"
-        shutil.copy2(path, dest)
+        if path.is_dir():
+            shutil.copytree(path, dest, symlinks=True)
+        else:
+            shutil.copy2(path, dest)
+
         index = _read_backup_index()
         index.append({
             "src": str(path),
             "backup": str(dest),
             "time": time.time(),
             "size": size,
+            "op": op,
+            "kind": "dir" if path.is_dir() else "file",
         })
-        # Trim the oldest entries (and their files) so the folder can't grow
-        # without bound over months of use.
-        while len(index) > MAX_BACKUPS:
-            old = index.pop(0)
-            try:
-                Path(old.get("backup", "")).unlink()
-            except OSError:
-                pass
+        index = _prune_backups(index)
         tmp = _BACKUP_INDEX.with_suffix(".tmp")
         tmp.write_text(json.dumps(index, ensure_ascii=False, indent=1), "utf-8")
         os.replace(tmp, _BACKUP_INDEX)
@@ -636,12 +734,16 @@ def delete_path(path: str = "", **_) -> ToolResult:
             return ToolResult(False, f"Refusing to delete protected path {p}.")
         if not p.exists():
             return ToolResult(False, f"No such path: {p}")
+        # The backup comes first for directories too. Deleting a tree used to be
+        # the one unrecoverable thing here: rmtree ran with nothing kept.
+        note = _backup(p, op="delete")
         if p.is_dir():
             shutil.rmtree(p)
-            return ToolResult(True, f"Deleted directory {p} (and its contents).")
-        note = _backup(p)
+            return ToolResult(True, f"Deleted directory {p} (and its contents).{note}")
         p.unlink()
         return ToolResult(True, f"Deleted file {p}.{note}")
+    except TooLargeToBackUp as exc:
+        return ToolResult(False, f"Refusing to delete: {exc}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(False, f"Could not delete: {exc}")
 
@@ -653,9 +755,14 @@ def move_path(src: str = "", dst: str = "", **_) -> ToolResult:
             return ToolResult(False, f"Source does not exist: {s}")
         if s in _PROTECTED:
             return ToolResult(False, f"Refusing to move protected path {s}.")
+        # Moving onto an existing path destroys whatever was there, and the
+        # destination is not mentioned anywhere the user would think to undo.
+        note = _backup(d, op="delete") if d.exists() else ""
         d.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(s), str(d))
-        return ToolResult(True, f"Moved {s} → {d}.")
+        return ToolResult(True, f"Moved {s} → {d}.{note}")
+    except TooLargeToBackUp as exc:
+        return ToolResult(False, f"Refusing to overwrite {dst}: {exc}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(False, f"Could not move/rename: {exc}")
 
@@ -689,18 +796,29 @@ def undo_file_change(path: str = "", **_) -> ToolResult:
         matches = entries  # newest overall
     entry = matches[-1]
     src, backup = entry.get("src", ""), Path(entry.get("backup", ""))
-    if not backup.is_file():
-        return ToolResult(False, f"The backup file for {src} is gone.")
+    if not backup.exists():
+        return ToolResult(False, f"The backup for {src} is gone.")
     try:
         dest = Path(src)
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Snapshot the current state too, so an undo can itself be undone.
         _backup(dest)
-        shutil.copy2(backup, dest)
+        if backup.is_dir():
+            # A restored tree replaces what is there rather than merging into
+            # it, or files the user deleted on purpose would quietly reappear.
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(backup, dest, symlinks=True)
+        else:
+            shutil.copy2(backup, dest)
+    except TooLargeToBackUp as exc:
+        # Restoring would destroy the current version with no way back to it.
+        return ToolResult(False, f"Refusing to restore over {src}: {exc}")
     except OSError as exc:
         return ToolResult(False, f"Could not restore {src}: {exc}")
     when = datetime.fromtimestamp(entry.get("time", 0)).strftime("%H:%M:%S")
-    return ToolResult(True, f"Restored {src} from the {when} backup.")
+    kind = "folder" if backup.is_dir() else "file"
+    return ToolResult(True, f"Restored {kind} {src} from the {when} backup.")
 
 
 # ── targeted file editing ─────────────────────────────────────────────────
@@ -735,10 +853,13 @@ def append_file(path: str = "", content: str = "", **_) -> ToolResult:
     """Append text to a file (creating it if needed)."""
     try:
         p = _expand(path)
+        note = _backup(p)
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as fh:
             fh.write(content or "")
-        return ToolResult(True, f"Appended {len(content or '')} bytes to {p}.")
+        return ToolResult(True, f"Appended {len(content or '')} bytes to {p}.{note}")
+    except TooLargeToBackUp as exc:
+        return ToolResult(False, f"Refusing to append: {exc}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(False, f"Could not append to file: {exc}")
 
@@ -929,6 +1050,7 @@ def ocr_image(path: str = "", lang: str = "", **_) -> ToolResult:
             "`sudo pacman -S tesseract tesseract-data-eng tesseract-data-tur`.",
         )
 
+    substituted = ""
     langs = (lang or "").strip()
     if not langs:
         available = _tesseract_langs()
@@ -945,7 +1067,12 @@ def ocr_image(path: str = "", lang: str = "", **_) -> ToolResult:
                     "text. Install it with `sudo pacman -S tesseract-data-eng "
                     "tesseract-data-tur`.",
                 )
+            # Reading Turkish with, say, German data does not fail — it returns
+            # confidently wrong text, silently flattening every ğ, ı, ş and ç.
+            # Nothing downstream can tell that from a clean read, so the output
+            # has to carry the warning itself.
             preferred = real[:1]
+            substituted = preferred[0]
         langs = "+".join(preferred)
 
     def _run(with_lang: bool) -> subprocess.CompletedProcess:
@@ -976,6 +1103,13 @@ def ocr_image(path: str = "", lang: str = "", **_) -> ToolResult:
     text = proc.stdout.strip()
     if not text:
         return ToolResult(True, "(no text detected in the image)")
+    if substituted:
+        text = (
+            f"[Warning: neither Turkish nor English OCR data is installed, so this "
+            f"was read with '{substituted}' instead. Accented characters are "
+            f"probably wrong — treat exact spellings with suspicion and suggest "
+            f"`sudo pacman -S tesseract-data-eng tesseract-data-tur`.]\n\n{text}"
+        )
     return ToolResult(True, _clip(text))
 
 

@@ -112,14 +112,33 @@ class Config:
             pass
 
     def save(self) -> None:
+        """Write the settings, never leaving the API key world-readable.
+
+        The temporary file is opened 0600 from the start rather than written
+        and chmod-ed afterwards. os.replace preserves the *temporary* file's
+        mode, so a tmp file created at the default umask (0644) handed that
+        mode straight to config.json, and the key sat readable by every local
+        account for the whole write plus the gap before the chmod. Widening a
+        file and narrowing it again is not the same as never widening it.
+
+        The directory is tightened too: 0600 on the file is no help while the
+        directory it lives in lets anyone list and open what is in it. Same
+        reasoning, and the same fix, as haze's storage/settings.py.
+        """
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = CONFIG_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
-        os.replace(tmp, CONFIG_FILE)
         try:
-            os.chmod(CONFIG_FILE, 0o600)
+            os.chmod(CONFIG_DIR, 0o700)
         except OSError:
             pass
+
+        tmp = CONFIG_FILE.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(self._data, f, indent=2)
+        # O_CREAT leaves an EXISTING tmp file's mode alone, so pin it here too
+        # for anyone upgrading from a version that wrote it world-readable.
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CONFIG_FILE)
 
     # ── access ───────────────────────────────────────────────────────────
     def get(self, key: str, default: Any = None) -> Any:

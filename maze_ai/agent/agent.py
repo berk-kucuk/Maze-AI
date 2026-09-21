@@ -22,6 +22,8 @@ from .safety import (
 )
 from .tools import (
     EGRESS_TOOLS,
+    IMPERSONATION_TOOLS,
+    SCREEN_TOOLS,
     PROTOCOL_SCHEMA,
     SENSITIVE_TOOLS,
     SIDE_EFFECT_TOOLS,
@@ -76,6 +78,8 @@ REASON_SENSITIVE = "it touches a sensitive path ({detail})"
 REASON_DESTRUCTIVE = "this command is destructive and cannot be undone"
 REASON_COMMAND = "it runs a command on your machine"
 REASON_CHANGES = "it changes something on your machine"
+REASON_SCREEN = "it photographs your screen and shows the result to the model"
+REASON_IMPERSONATION = "it puts a message on your desktop under Maze AI's name"
 
 #: Reasons that must be confirmed every single time — never "always allow".
 UNSKIPPABLE_REASONS = (REASON_SENSITIVE, REASON_DESTRUCTIVE)
@@ -962,16 +966,35 @@ class Agent:
             if hit:
                 return REASON_SENSITIVE, hit
 
+        # 3. Photographing the screen. Not a system change, so it never
+        #    belonged in SIDE_EFFECT_TOOLS — but it is the broadest read the
+        #    assistant can perform, and on a hosted backend the capture leaves
+        #    the machine. Reading a private key by path already asks; a
+        #    photograph of it must not be the way around that.
+        if action in SCREEN_TOOLS and self.mode != MODE_AUTO:
+            return REASON_SCREEN, str(action_input.get("name", "") or "")
+
+        # 4. Speaking as Maze AI. A notification the user did not ask for is a
+        #    phishing surface — they trust their own assistant more than they
+        #    trust a web page.
+        if action in IMPERSONATION_TOOLS and self.mode != MODE_AUTO:
+            title = str(action_input.get("title", ""))
+            message = str(action_input.get("message", ""))
+            return REASON_IMPERSONATION, f"{title} — {message}".strip(" —")
+
         if action not in SIDE_EFFECT_TOOLS:
             return None, ""
 
         if action == "run_command":
             command = str(action_input.get("command", ""))
+            # The destructive check comes first on purpose. "Always confirm
+            # destructive commands, even in autonomous mode" has to outrank a
+            # remembered approval too, or one entry on the allow-list — however
+            # it got there — silently disarms the guard from then on.
+            if self.block_dangerous and is_dangerous_command(command):
+                return REASON_DESTRUCTIVE, command
             if command.strip() and command.strip() in self.always_allow:
                 return None, ""
-            if self.block_dangerous and is_dangerous_command(command):
-                # Always confirm destructive commands, even in autonomous mode.
-                return REASON_DESTRUCTIVE, command
             if self.mode == MODE_AUTO:
                 return None, ""
             if self.auto_approve_readonly and is_readonly_command(command):

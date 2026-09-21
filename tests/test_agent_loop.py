@@ -285,3 +285,71 @@ def test_shell_history_can_be_left_unguarded():
     rec = Recorder()
     agent.run("what did I just run?", rec.emit, rec.approve)
     assert not rec.approvals
+
+
+# ── screen capture is the broadest read there is ───────────────────────────
+def test_photographing_the_screen_is_confirmed():
+    # Reading ~/.ssh/id_rsa by path already asks. A screenshot of the terminal
+    # displaying that same key must not be the way around it — and on a hosted
+    # backend the capture leaves the machine entirely.
+    agent = make_agent([tool_call("read_screen"), final("done")], mode=MODE_ASK)
+    rec = Recorder(approve=False)
+    agent.run("what's on my screen?", rec.emit, rec.approve)
+    assert rec.approvals, "screen capture must be confirmed"
+    assert "photographs your screen" in rec.approvals[0].reason
+
+
+def test_capturing_a_named_window_is_confirmed_too():
+    agent = make_agent([tool_call("read_window", name="KeePassXC"), final("done")],
+                       mode=MODE_ASK)
+    rec = Recorder(approve=False)
+    agent.run("read that window", rec.emit, rec.approve)
+    assert rec.approvals
+
+
+def test_autonomous_mode_still_lets_the_screen_be_read():
+    # A deliberate boundary: "autonomous" means autonomous. Only the two
+    # categories the codebase already treats as unskippable — destructive
+    # commands and reading secrets — override it.
+    agent = make_agent([tool_call("read_screen"), final("done")], mode=MODE_AUTO)
+    rec = Recorder()
+    agent.run("what's on my screen?", rec.emit, rec.approve)
+    assert not rec.approvals
+
+
+# ── speaking as Maze AI ────────────────────────────────────────────────────
+def test_sending_a_notification_is_confirmed():
+    # A notification carries the assistant's name, and people trust that more
+    # than a web page — so a page must not put words in its mouth unattended.
+    agent = make_agent(
+        [tool_call("notify", title="Your password expired",
+                   message="Visit evil.example to reset"), final("done")],
+        mode=MODE_ASK,
+    )
+    rec = Recorder(approve=False)
+    agent.run("check my mail", rec.emit, rec.approve)
+    assert rec.approvals
+    assert "under Maze AI's name" in rec.approvals[0].reason
+    assert "evil.example" in rec.approvals[0].reason_detail
+
+
+# ── a remembered approval must not outrank the destructive guard ───────────
+def test_an_allow_listed_command_is_still_stopped_when_destructive():
+    agent = make_agent(
+        [tool_call("run_command", command="rm -rf ~/Documents"), final("done")],
+        mode=MODE_AUTO,
+    )
+    agent.always_allow = ["rm -rf ~/Documents"]
+    rec = Recorder(approve=False)
+    agent.run("clean up", rec.emit, rec.approve)
+    assert rec.approvals, "a destructive command must ask even if allow-listed"
+    assert "destructive" in rec.approvals[0].reason
+
+
+def test_an_allow_listed_harmless_command_is_still_remembered():
+    agent = make_agent([tool_call("run_command", command="npm install"), final("done")],
+                       mode=MODE_ASK)
+    agent.always_allow = ["npm install"]
+    rec = Recorder()
+    agent.run("install deps", rec.emit, rec.approve)
+    assert not rec.approvals, "remembering an approval still has to work"

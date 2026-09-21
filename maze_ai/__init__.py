@@ -8,6 +8,6 @@ title bar, animated aurora background and a system-tray presence.
 # Kept in step with pyproject.toml. Reading it back from the installed
 # distribution metadata sounds tidier, but a stale egg-info in the source tree
 # then reports an old number — the literal is the honest answer.
-__version__ = "1.11.2"
+__version__ = "1.17.1"
 
 __app_name__ = "Maze AI"

@@ -51,7 +51,7 @@ def is_dangerous_command(command: str) -> bool:
 _READONLY_CMDS = {
     "ls", "cat", "pwd", "whoami", "id", "df", "du", "free", "uptime", "date",
     "head", "tail", "wc", "stat", "file", "uname", "lscpu", "lsblk", "lsusb",
-    "lspci", "ps", "which", "whereis", "env", "printenv", "cal", "hostname",
+    "lspci", "ps", "which", "whereis", "printenv", "cal", "hostname",
     "echo", "printf", "tree", "realpath", "dirname", "basename", "nproc",
     "arch", "groups", "locale", "getent", "neofetch", "fastfetch", "sensors",
     "true", "test",
@@ -60,6 +60,41 @@ _READONLY_CMDS = {
     "tr", "comm", "diff", "cmp", "tac", "rev", "fold", "nl", "paste", "look",
     "expand", "unexpand",
 }
+# NOT in the list, on purpose: `env`. It reads the environment when called with
+# no arguments, but its actual job is running a program — `env <anything>` is
+# arbitrary execution wearing a read-only name, which made it a way past this
+# whole function. `printenv` covers the legitimate use.
+
+# Flags that turn one of the commands above into something that WRITES a file
+# or RUNS code. Deliberately per-command rather than one global list: `-o` is a
+# file to overwrite for `sort` and merely "only-matching" for `grep`, so a
+# blanket ban would be both wrong and annoying. Every entry was checked against
+# that program's own manual.
+_UNSAFE_FLAGS: dict[str, set[str]] = {
+    "sort":      {"-o", "--output"},        # writes its result to a file
+    "tree":      {"-o"},                    # same
+    "date":      {"-s", "--set"},           # sets the system clock
+    "hostname":  {"-b", "--boot", "-F", "--file"},
+    "file":      {"-m", "--magic-file", "-C", "--compile"},
+    # These source a *shell script* as their config, so pointing them at an
+    # attacker-chosen file is straightforward code execution.
+    "neofetch":  {"--config"},
+    "fastfetch": {"-c", "--config"},
+}
+
+
+def _has_unsafe_flag(base: str, tokens: list[str]) -> bool:
+    """True if a read-only command carries a flag that makes it write or run."""
+    unsafe = _UNSAFE_FLAGS.get(base)
+    if not unsafe:
+        return False
+    for token in tokens:
+        # Both spellings: `--output FILE` and `--output=FILE`.
+        if token in unsafe or token.split("=", 1)[0] in unsafe:
+            return True
+    return False
+
+
 # base command -> set of read-only subcommands (None = always read-only).
 _READONLY_SUBCMD: dict[str, set[str] | None] = {
     "git": {"status", "log", "diff", "branch", "show", "remote", "tag",
@@ -73,7 +108,21 @@ _READONLY_SUBCMD: dict[str, set[str] | None] = {
     "pip": {"list", "show", "freeze"},
     "npm": {"list", "ls", "view", "outdated"},
 }
-_SHELL_SPLIT = re.compile(r"\|\||&&|\||;|&")
+# Commands whose operation is spelled as a FLAG rather than a word, so the
+# "first non-flag token is the subcommand" rule below cannot apply to them.
+_FLAG_SUBCMD = {"pacman"}
+
+# Every way the shell starts a NEW command inside one string. A newline belongs
+# here as much as `;` does: leaving it out meant "ls\n<anything>" was judged on
+# the `ls` alone and everything after the line break ran unexamined — the whole
+# rest of the command line was invisible to this function.
+_SHELL_SPLIT = re.compile(r"\|\||&&|\||;|&|\n|\r")
+
+# Substrings that hand a piece of the command line back to the shell to execute
+# as a command of its own. `$(` and a backtick are the familiar pair; `<(` and
+# `>(` (process substitution) do the same thing and were missing, so
+# `grep foo <(curl …)` passed as a read-only grep.
+_SHELL_EXEC_MARKERS = ("$(", "`", "<(", ">(")
 
 
 def is_readonly_command(command: str) -> bool:
@@ -83,9 +132,16 @@ def is_readonly_command(command: str) -> bool:
     unrecognised command is treated as NOT read-only, so it still goes through
     the normal approval path. A read-only command that reads a *secret* is not
     considered safe either — see :func:`touches_sensitive_path`.
+
+    The whole command line has to survive this, not just its first word. Every
+    hole this function has had was the same shape: something that starts a
+    second command — a newline, a process substitution, ``env`` — sitting in a
+    line whose *first* token looked harmless.
     """
     cmd = (command or "").strip()
-    if not cmd or ">" in cmd or "`" in cmd or "$(" in cmd:
+    if not cmd or ">" in cmd:
+        return False
+    if any(marker in cmd for marker in _SHELL_EXEC_MARKERS):
         return False
     if touches_sensitive_path(cmd):
         return False
@@ -101,10 +157,35 @@ def is_readonly_command(command: str) -> bool:
             return False
         base = tokens[0]
         if base in _READONLY_CMDS:
+            if _has_unsafe_flag(base, tokens[1:]):
+                return False
             continue
         if base in _READONLY_SUBCMD:
             allowed = _READONLY_SUBCMD[base]
-            if allowed is None or any(t in allowed for t in tokens[1:]):
+            if allowed is None:
+                continue
+            if base in _FLAG_SUBCMD:
+                # pacman-style: the operation IS a flag. Require that at least
+                # one is a listed read-only operation and that no OTHER flag
+                # rides along, since an unlisted one could be anything.
+                flags = [t for t in tokens[1:] if t.startswith("-")]
+                if flags and all(f in allowed for f in flags):
+                    continue
+                return False
+            # Word-style subcommand: judge the FIRST non-flag token, not "any
+            # token that happens to appear in the list". `any()` let
+            # `git checkout branch` through on the word "branch", and let
+            # `git -c core.pager=<command> log` through on the word "log" —
+            # which runs that command through git's pager.
+            rest = tokens[1:]
+            if rest and any(t.startswith("-") for t in rest[:1]):
+                # A flag BEFORE the subcommand is how these tools are told to
+                # load config or an alternate helper (`git -c`, `git
+                # --exec-path`). Nothing read-only needs one, so refusing costs
+                # a prompt and closes the category rather than one flag of it.
+                return False
+            subcmd = next((t for t in rest if not t.startswith("-")), "")
+            if subcmd in allowed:
                 continue
         return False
     return True
@@ -137,6 +218,19 @@ _SENSITIVE_PATTERNS = [
     r"/etc/(shadow|gshadow|sudoers)",
     r"\.(pem|p12|pfx|jks|keystore)$",
     r"(secret|credential|passwd|password|api[_-]?key|token)s?\.(json|ya?ml|txt|ini|conf|env)$",
+    # Persistence. Nothing here holds a secret — these are the files that decide
+    # what runs automatically, at every login or every shell. A line appended to
+    # .bashrc or a .desktop dropped in autostart is code execution from then on,
+    # long after the conversation that wrote it is forgotten, so it gets the same
+    # "always ask, never remember the approval" treatment as a private key.
+    r"(^|/)\.(bashrc|zshrc|profile|bash_profile|bash_login|zprofile|zshenv)$",
+    r"(^|/)\.config/fish/config\.fish$",
+    r"(^|/)\.config/autostart(/|$)",
+    r"(^|/)\.config/systemd/user(/|$)",
+    r"(^|/)\.config/plasma-workspace/env(/|$)",
+    # The backup store is the undo history itself. Editing its index is how you
+    # would make a deletion unrecoverable without anyone noticing.
+    r"(^|/)\.local/share/maze-ai/backups(/|$)",
 ]
 _SENSITIVE_RE = re.compile("|".join(_SENSITIVE_PATTERNS), re.IGNORECASE)
 

@@ -174,3 +174,104 @@ def test_read_file_offset_past_the_end(tmp_path):
     f.write_text("one\ntwo\n")
     res = tools.read_file(path=str(f), offset=99, limit=5)
     assert not res.ok and "past the end" in res.output
+
+
+# ── data loss: what used to be unrecoverable ────────────────────────────────
+def test_deleting_a_folder_is_undoable(tmp_path, backups):
+    # This was the one genuinely unrecoverable operation: rmtree ran with
+    # nothing kept, so an agent that misread "clean up" cost the whole tree.
+    folder = tmp_path / "project"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "a.txt").write_text("one")
+    (folder / "sub" / "b.txt").write_text("two")
+
+    res = tools.delete_path(path=str(folder))
+    assert res.ok and not folder.exists()
+
+    undo = tools.undo_file_change(path=str(folder))
+    assert undo.ok, undo.output
+    assert (folder / "a.txt").read_text() == "one"
+    assert (folder / "sub" / "b.txt").read_text() == "two"
+
+
+def test_restoring_a_folder_replaces_rather_than_merges(tmp_path, backups):
+    # Merging would quietly resurrect files the user deleted on purpose.
+    folder = tmp_path / "project"
+    folder.mkdir()
+    (folder / "keep.txt").write_text("original")
+    tools.delete_path(path=str(folder))
+    folder.mkdir()
+    (folder / "added-later.txt").write_text("x")
+
+    tools.undo_file_change(path=str(folder))
+
+    assert (folder / "keep.txt").read_text() == "original"
+    assert not (folder / "added-later.txt").exists()
+
+
+def test_moving_onto_an_existing_file_keeps_what_was_there(tmp_path, backups):
+    # The destination is destroyed by the move and named nowhere the user
+    # would think to look, so it has to be snapshotted for them.
+    src, dst = tmp_path / "new.txt", tmp_path / "old.txt"
+    src.write_text("incoming")
+    dst.write_text("about to be lost")
+
+    assert tools.move_path(src=str(src), dst=str(dst)).ok
+    assert dst.read_text() == "incoming"
+
+    assert tools.undo_file_change(path=str(dst)).ok
+    assert dst.read_text() == "about to be lost"
+
+
+def test_appending_to_a_file_is_undoable(tmp_path, backups):
+    f = tmp_path / "log.txt"
+    f.write_text("first\n")
+    assert tools.append_file(path=str(f), content="second\n").ok
+    assert f.read_text() == "first\nsecond\n"
+
+    assert tools.undo_file_change(path=str(f)).ok
+    assert f.read_text() == "first\n"
+
+
+def test_something_too_big_to_back_up_is_not_deleted(tmp_path, backups, monkeypatch):
+    # "Could not back it up, so I deleted it anyway" is the exact failure the
+    # backup store exists to prevent.
+    monkeypatch.setattr(tools, "MAX_BACKUP_BYTES", 10)
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * 100)
+
+    res = tools.delete_path(path=str(big))
+
+    assert not res.ok
+    assert big.exists(), "a file that could not be snapshotted must survive"
+    assert "could not be undone" in res.output
+
+
+def test_a_folder_too_big_to_back_up_is_not_deleted(tmp_path, backups, monkeypatch):
+    monkeypatch.setattr(tools, "MAX_BACKUP_BYTES", 10)
+    folder = tmp_path / "huge"
+    folder.mkdir()
+    (folder / "a.bin").write_bytes(b"x" * 100)
+
+    assert not tools.delete_path(path=str(folder)).ok
+    assert (folder / "a.bin").exists()
+
+
+def test_old_backups_are_retired_by_age_not_by_count(tmp_path, backups):
+    # Count-based eviction quietly made a deletion from last week
+    # unrecoverable as soon as a busy afternoon filled the list.
+    import json
+    import time
+
+    f = tmp_path / "notes.txt"
+    f.write_text("keep me")
+    tools.delete_path(path=str(f))
+
+    index = json.loads(tools._BACKUP_INDEX.read_text())
+    assert index[-1]["op"] == "delete", "a deletion should be recorded as one"
+
+    # A deletion outlives an edit of the same age.
+    old_edit = dict(index[-1], op="write", time=time.time() - 40 * 86400)
+    old_delete = dict(index[-1], time=time.time() - 40 * 86400)
+    kept = tools._prune_backups([old_edit, old_delete])
+    assert [e["op"] for e in kept] == ["delete"]

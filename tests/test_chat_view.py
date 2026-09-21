@@ -177,3 +177,145 @@ def test_the_view_follows_the_text_but_not_the_reader(app):
     view.append_stream("new answer")
     view._glide_to_bottom()
     assert bar.value() == 0, "streaming must not yank the view away from the reader"
+
+
+# ── progressive code blocks while still streaming ───────────────────────────
+# Previously every code answer rendered as plain text with literal backticks
+# for the whole reply, then snapped into a monospaced CodeBlock the instant it
+# finished — a visible "the message just changed font" glitch right on landing.
+def test_a_closed_fence_becomes_a_real_code_block_mid_stream(app):
+    bubble = _Bubble("", user=False)
+    bubble.set_streaming_text("Here:\n```sh\nls -la\n```\n")
+    assert any(isinstance(w, CodeBlock) for w in bubble._extra)
+    block = next(w for w in bubble._extra if isinstance(w, CodeBlock))
+    assert block.code == "ls -la"
+
+
+def test_an_open_fence_stays_plain_until_it_closes(app):
+    bubble = _Bubble("", user=False)
+    bubble.set_streaming_text("Here:\n```sh\nls -l")   # no closing fence yet
+    assert bubble._extra == []
+    assert bubble.label.textFormat() == Qt.TextFormat.PlainText
+
+
+def test_prose_after_a_closed_block_keeps_streaming_as_plain_text(app):
+    bubble = _Bubble("", user=False)
+    bubble.set_streaming_text("```sh\nls\n```\nAnd then some ")
+    tail = bubble._tail_label
+    assert tail is not None
+    assert tail.textFormat() == Qt.TextFormat.PlainText
+    # The trailing space is real, live content — the model is still typing,
+    # trimming it would flicker the text as the next word lands.
+    assert tail.text() == "And then some "
+
+    bubble.set_streaming_text("```sh\nls\n```\nAnd then some more text")
+    assert bubble._tail_label is tail, "the tail label should be updated, not rebuilt"
+    assert "more text" in tail.text()
+
+
+def test_the_code_block_is_not_rebuilt_once_it_has_closed(app):
+    # Rebuilding on every frame for the rest of the answer would recreate the
+    # same CodeBlock dozens of times as trailing prose streams in.
+    bubble = _Bubble("", user=False)
+    bubble.set_streaming_text("```sh\nls\n```\nmore")
+    block = next(w for w in bubble._extra if isinstance(w, CodeBlock))
+    bubble.set_streaming_text("```sh\nls\n```\nmore text still arriving")
+    assert next(w for w in bubble._extra if isinstance(w, CodeBlock)) is block
+
+
+def test_a_second_fence_closing_adds_its_own_block(app):
+    bubble = _Bubble("", user=False)
+    bubble.set_streaming_text("```sh\na\n```\ntext\n```py\nb")
+    assert [w.code for w in bubble._extra if isinstance(w, CodeBlock)] == ["a"]
+    bubble.set_streaming_text("```sh\na\n```\ntext\n```py\nb\n```")
+    assert [w.code for w in bubble._extra if isinstance(w, CodeBlock)] == ["a", "b"]
+
+
+def test_finalizing_after_progressive_code_blocks_still_matches_set_text(app):
+    # The streaming path and the final render must agree, or the message
+    # visibly changes shape one more time right as it lands.
+    text = "```sh\nls\n```\nAnd a closing line."
+    bubble = _Bubble("", user=False)
+    bubble.set_streaming_text(text)
+    streamed_blocks = [w.code for w in bubble._extra if isinstance(w, CodeBlock)]
+    bubble.set_text(text)
+    final_blocks = [w.code for w in bubble._extra if isinstance(w, CodeBlock)]
+    assert streamed_blocks == final_blocks
+
+
+def test_many_rapid_rebuilds_do_not_crash(app):
+    # Regression guard: _clear_extra() uses deleteLater(), and rebuilding
+    # widgets many times in a tight loop is exactly the pattern that has
+    # crashed elsewhere in this codebase (Quick Ask) when a widget's Python
+    # wrapper was collected before its deferred delete ran. This drives the
+    # same rebuild path dozens of times with the event loop pumped between
+    # each, the way real streaming frames actually arrive.
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    bubble = _Bubble("", user=False)
+    text = ""
+    for i in range(40):
+        text += f"```sh\ncmd{i}\n```\nsome trailing prose after block {i}\n"
+        bubble.set_streaming_text(text)
+        loop = QEventLoop()
+        QTimer.singleShot(0, loop.quit)
+        loop.exec()
+    blocks = [w.code for w in bubble._extra if isinstance(w, CodeBlock)]
+    assert blocks == [f"cmd{i}" for i in range(40)]
+
+
+# ── segment ordering ────────────────────────────────────────────────────────
+def body_order(bubble):
+    """The visible widgets top to bottom, as the user actually sees them."""
+    out = []
+    for i in range(bubble._body.count()):
+        widget = bubble._body.itemAt(i).widget()
+        if widget is None or not widget.isVisibleTo(bubble):
+            continue
+        if isinstance(widget, CodeBlock):
+            out.append(("code", widget.code))
+        elif widget.text():
+            out.append(("text", widget.text()))
+    return out
+
+
+def test_prose_after_a_code_block_renders_below_it(app):
+    # The permanent label sits at the top of the layout, so reusing it for a
+    # prose chunk that came *after* the code hoisted the explanation above the
+    # command it was describing — and answers that open with a code block are
+    # the common shape.
+    bubble = _Bubble("```sh\nls\n```\nThis lists files.", user=False)
+    assert body_order(bubble) == [("code", "ls"), ("text", "This lists files.")]
+
+
+def test_prose_before_a_code_block_still_renders_above_it(app):
+    bubble = _Bubble("Here it is:\n```sh\nls\n```", user=False)
+    assert body_order(bubble) == [("text", "Here it is:"), ("code", "ls")]
+
+
+def test_prose_around_a_code_block_keeps_its_order(app):
+    bubble = _Bubble("First:\n```sh\nls\n```\nThen this.", user=False)
+    assert body_order(bubble) == [
+        ("text", "First:"), ("code", "ls"), ("text", "Then this."),
+    ]
+
+
+@pytest.mark.parametrize("text", [
+    "```sh\nls\n```\nThis lists files.",
+    "Here it is:\n```sh\nls\n```",
+    "First:\n```sh\nls\n```\nThen this.",
+    "```sh\na\n```\nbetween\n```py\nb\n```",
+    "```sh\nls\n```",
+    "no code at all",
+])
+def test_streaming_and_final_agree_on_layout(app, text):
+    # If these disagree the message visibly rearranges itself the instant it
+    # lands, which is the whole class of glitch this file guards against.
+    streaming = _Bubble("", user=False)
+    streaming.set_streaming_text(text)
+    final = _Bubble("", user=False)
+    final.set_text(text)
+
+    kinds_streaming = [kind for kind, _ in body_order(streaming)]
+    kinds_final = [kind for kind, _ in body_order(final)]
+    assert kinds_streaming == kinds_final

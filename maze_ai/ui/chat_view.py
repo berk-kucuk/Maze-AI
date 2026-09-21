@@ -66,6 +66,10 @@ _SCROLL_EASE = 0.35          # fraction of the remaining gap covered per frame
 _IDLE_FRAMES = 40            # ~0.6 s of nothing new: park the timer
 
 _FENCE_RE = re.compile(r"```([\w+#.-]*)[ \t]*\n?(.*?)(?:```|\Z)", re.DOTALL)
+#: Only fences that have actually closed — no ``\Z`` fallback. Used mid-stream
+#: to tell "this code block is finished" from "still being typed", since the
+#: closing fence's own three backticks arrive one character at a time too.
+_CLOSED_FENCE_RE = re.compile(r"```([\w+#.-]*)[ \t]*\n?(.*?)```", re.DOTALL)
 _MONO = "'JetBrains Mono','DejaVu Sans Mono',monospace"
 
 
@@ -150,6 +154,31 @@ def split_code_blocks(text: str) -> list[tuple[str, str, str]]:
     return segments
 
 
+def _closed_segments(text: str) -> tuple[list[tuple[str, str, str]], str]:
+    """Segments for fences that have already closed, plus the still-open tail.
+
+    The tail — everything after the last closed fence, including one that has
+    only just been opened — is still being typed and is not resolved into a
+    segment yet, so a code block doesn't flicker into existence while its own
+    closing ``` is arriving character by character.
+    """
+    segments: list[tuple[str, str, str]] = []
+    pos = 0
+    for match in _CLOSED_FENCE_RE.finditer(text or ""):
+        before = text[pos:match.start()]
+        if before.strip():
+            segments.append(("text", before.strip("\n"), ""))
+        code = match.group(2)
+        if code.strip():
+            segments.append(("code", code.rstrip("\n"), match.group(1) or ""))
+        pos = match.end()
+    # Matches the "\n"-stripping every other text segment already gets, so
+    # the tail looks identical once it becomes a real segment at finalize —
+    # otherwise a stray leading blank line would vanish right as the message
+    # lands, one more small version of the exact glitch this is fixing.
+    return segments, (text or "")[pos:].strip("\n")
+
+
 class _Bubble(QFrame):
     def __init__(self, text: str, *, user: bool, actions: bool = False) -> None:
         super().__init__()
@@ -178,6 +207,11 @@ class _Bubble(QFrame):
         self.label = self._new_label()
         self._body.addWidget(self.label)
         self._extra: list[QWidget] = []
+        # Streaming-only bookkeeping: how many fences have already closed (so
+        # a rebuild only happens when a new one does) and the label showing
+        # whatever prose is still being typed after them.
+        self._closed_segment_count = 0
+        self._tail_label: QLabel | None = None
         if text:
             self.set_text(text)
 
@@ -224,51 +258,89 @@ class _Bubble(QFrame):
             widget.deleteLater()
         self._extra = []
 
-    def set_text(self, text: str) -> None:
-        """Set the final text: prose as Markdown, fenced code as code blocks."""
-        self.raw_text = text
-        self._clear_extra()
-        segments = split_code_blocks(text)
-        if not any(kind == "code" for kind, _, _ in segments):
-            self.label.setTextFormat(Qt.TextFormat.MarkdownText)
-            self.label.setText(text)
-            self.label.setVisible(bool(text))
-            return
+    def _render_segments(
+        self, segments: list[tuple[str, str, str]], *, first_format: Qt.TextFormat
+    ) -> None:
+        """Lay out (prose | code) segments in the order they were written.
 
-        # The first prose chunk reuses the permanent label; anything after it
-        # is rebuilt each time (answers are set at most a couple of times).
-        first_used = False
-        for kind, content, language in segments:
-            if kind == "text" and not first_used:
-                self.label.setTextFormat(Qt.TextFormat.MarkdownText)
+        The permanent label is only reused when prose comes *first*, because it
+        sits at the top of the body layout and everything else is appended
+        after it. Reusing it for a later prose chunk — the explanation that
+        follows an answer opening with a code block, which is how most of these
+        answers are shaped — hoisted that text above the code it was describing.
+        """
+        self._clear_extra()
+        reuse_label = bool(segments) and segments[0][0] == "text"
+        for index, (kind, content, language) in enumerate(segments):
+            if reuse_label and index == 0:
+                self.label.setTextFormat(first_format)
                 self.label.setText(content)
                 self.label.setVisible(True)
-                first_used = True
                 continue
             widget: QWidget
             if kind == "code":
                 widget = CodeBlock(content, language)
             else:
                 widget = self._new_label()
+                widget.setTextFormat(Qt.TextFormat.MarkdownText)
                 widget.setText(content)
             self._body.addWidget(widget)
             self._extra.append(widget)
-        if not first_used:
+        if not reuse_label:
             self.label.setVisible(False)
+
+    def set_text(self, text: str) -> None:
+        """Set the final text: prose as Markdown, fenced code as code blocks."""
+        self.raw_text = text
+        segments = split_code_blocks(text)
+        if not any(kind == "code" for kind, _, _ in segments):
+            self._clear_extra()
+            self.label.setTextFormat(Qt.TextFormat.MarkdownText)
+            self.label.setText(text)
+            self.label.setVisible(bool(text))
+            return
+        self._render_segments(segments, first_format=Qt.TextFormat.MarkdownText)
 
     def set_streaming_text(self, text: str) -> None:
         """Set partial text while the answer is still arriving.
 
-        Deliberately plain: re-parsing the whole Markdown document on every
-        token makes a long answer quadratically slower to render, and half-typed
-        Markdown (an unclosed ``**`` or code fence) flickers as it resolves.
-        The finished text is re-rendered as Markdown by :meth:`set_text`.
+        Prose stays plain rather than re-parsed as Markdown on every token:
+        that would make a long answer quadratically slower to render, and
+        half-typed syntax (an unclosed ``**`` or code fence) flickers as it
+        resolves. But a fenced code block that has already *closed* is shown
+        as a real, monospaced code block immediately — without this, every
+        code answer rendered as a plain paragraph with literal backticks for
+        the whole reply, then snapped into a completely different look (font,
+        box, spacing) the instant the message finished, which read as the
+        message visibly glitching right when it landed.
         """
         self.raw_text = text
-        self._clear_extra()
-        self.label.setVisible(True)
-        self.label.setTextFormat(Qt.TextFormat.PlainText)
-        self.label.setText(text)
+        closed, tail = _closed_segments(text)
+        if not closed:
+            self._clear_extra()
+            self.label.setVisible(True)
+            self.label.setTextFormat(Qt.TextFormat.PlainText)
+            self.label.setText(text)
+            return
+
+        # Rebuilding the closed segments is only needed when a new one has
+        # just closed — otherwise the code block(s) are already in place and
+        # only the still-typing tail below them needs updating, every frame,
+        # for as long as the model keeps writing prose after the code.
+        if len(closed) != self._closed_segment_count:
+            self._render_segments(closed, first_format=Qt.TextFormat.PlainText)
+            self._closed_segment_count = len(closed)
+            self._tail_label = None
+
+        if tail.strip():
+            if self._tail_label is None:
+                self._tail_label = self._new_label()
+                self._tail_label.setTextFormat(Qt.TextFormat.PlainText)
+                self._body.addWidget(self._tail_label)
+                self._extra.append(self._tail_label)
+            self._tail_label.setText(tail)
+        elif self._tail_label is not None:
+            self._tail_label.setVisible(False)
 
 
 class StepLine(QFrame):

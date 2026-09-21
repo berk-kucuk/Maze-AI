@@ -1,6 +1,6 @@
 # Maintainer: Berk Küçük <dev.berkkucukk@gmail.com>
 pkgname=maze-ai
-pkgver=1.11.2
+pkgver=1.17.1
 pkgrel=1
 pkgdesc="Agentic AI assistant for Maze Linux — local models via Ollama, native tool calling, monochrome UI"
 arch=('any')
@@ -45,6 +45,10 @@ package() {
     # Desktop entry + icons
     install -Dm644 maze-ai.desktop \
         "$pkgdir/usr/share/applications/maze-ai.desktop"
+    # Same file again where kglobalacceld looks for default shortcuts
+    # (X-KDE-Shortcuts on the Quick Ask action → Meta+M).
+    install -Dm644 maze-ai.desktop \
+        "$pkgdir/usr/share/kglobalaccel/maze-ai.desktop"
     install -Dm644 maze_ai/resources/logo.png \
         "$pkgdir/usr/share/icons/hicolor/512x512/apps/maze-ai.png"
     install -Dm644 maze_ai/resources/logo.png \

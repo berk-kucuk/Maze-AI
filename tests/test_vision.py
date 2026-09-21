@@ -112,3 +112,59 @@ def test_tesseract_langs_parsing(monkeypatch):
 
     monkeypatch.setattr(tools_mod.subprocess, "run", lambda *a, **k: _Proc())
     assert _tesseract_langs() == {"eng", "tur"}
+
+
+# ── OCR language substitution ───────────────────────────────────────────────
+def _ok_proc(text):
+    class _Proc:
+        returncode = 0
+        stdout = text
+        stderr = ""
+    return _Proc
+
+
+def test_a_substituted_language_is_announced_in_the_output(img, monkeypatch):
+    # Reading Turkish with the wrong language data does not fail — it returns
+    # confidently wrong text with every ğ, ı, ş and ç quietly flattened, and
+    # nothing downstream can tell that from a clean read.
+    monkeypatch.setattr(tools_mod.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(tools_mod, "_tesseract_langs", lambda: {"afr", "osd"})
+    monkeypatch.setattr(tools_mod.subprocess, "run",
+                        lambda *a, **k: _ok_proc("Degisiklikler kaydedilmedi")())
+
+    res = tools_mod.ocr_image(img)
+
+    assert res.ok
+    assert "Warning" in res.output
+    assert "afr" in res.output
+    assert "tesseract-data-tur" in res.output, "it should say what to install"
+    assert "Degisiklikler kaydedilmedi" in res.output, "the text still comes through"
+
+
+def test_no_warning_when_the_right_language_is_available(img, monkeypatch):
+    monkeypatch.setattr(tools_mod.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(tools_mod, "_tesseract_langs", lambda: {"tur", "eng"})
+    monkeypatch.setattr(tools_mod.subprocess, "run",
+                        lambda *a, **k: _ok_proc("Değişiklikler kaydedilmedi")())
+
+    res = tools_mod.ocr_image(img)
+
+    assert res.output == "Değişiklikler kaydedilmedi"
+
+
+def test_english_alone_is_not_treated_as_a_substitution(img, monkeypatch):
+    # eng is one of the two the code actually wants — a real choice, not a
+    # fallback, even when Turkish is missing.
+    monkeypatch.setattr(tools_mod.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(tools_mod, "_tesseract_langs", lambda: {"eng", "osd"})
+    monkeypatch.setattr(tools_mod.subprocess, "run", lambda *a, **k: _ok_proc("Hello")())
+
+    assert "Warning" not in tools_mod.ocr_image(img).output
+
+
+def test_an_explicit_language_is_never_second_guessed(img, monkeypatch):
+    monkeypatch.setattr(tools_mod.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(tools_mod, "_tesseract_langs", lambda: {"afr", "osd"})
+    monkeypatch.setattr(tools_mod.subprocess, "run", lambda *a, **k: _ok_proc("text")())
+
+    assert "Warning" not in tools_mod.ocr_image(img, lang="afr").output

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maze-ai"
-version = "1.11.2"
+version = "1.17.1"
 description = "Agentic AI assistant for Maze Linux — local models via Ollama, native tool calling, monochrome UI."
 readme = "README.md"
 requires-python = ">=3.10"

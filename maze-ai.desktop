@@ -17,6 +17,12 @@ Name=Quick Ask
 Name[tr]=Hızlı sor
 Exec=maze-ai --ask
 Icon=maze-ai
+# Default global shortcut. kglobalacceld registers it from the copy of this
+# file that the package installs under /usr/share/kglobalaccel/ (that is the
+# directory it scans — the applications one is not enough), and it lands in
+# System Settings → Shortcuts → Applications → Maze AI, where it can be
+# changed like any other.
+X-KDE-Shortcuts=Meta+M
 
 [Desktop Action clipboard]
 Name=Ask about the clipboard
