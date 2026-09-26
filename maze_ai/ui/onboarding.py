@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from ..i18n import tr
 from .effects import AuroraCard
+from .richtext import harden_labels
 from .theme import LOGO_PATH, STYLESHEET, TEXT_DIM
 
 
@@ -26,7 +27,7 @@ class OnboardingDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
-        self.resize(520, 460)
+        self.resize(580, 520)
         self.setStyleSheet(STYLESHEET)
 
         root = QVBoxLayout(self)
@@ -35,7 +36,8 @@ class OnboardingDialog(QDialog):
         root.addWidget(card)
 
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(40, 36, 40, 34)
+        lay.setContentsMargins(card.margin + 30, card.margin + 28,
+                               card.margin + 30, card.margin + 24)
         lay.setSpacing(14)
 
         logo = QLabel()
@@ -79,3 +81,6 @@ class OnboardingDialog(QDialog):
         go.clicked.connect(self.accept)
         buttons.addWidget(go)
         lay.addLayout(buttons)
+        go.setDefault(True)
+        go.setFocus()
+        harden_labels(self)

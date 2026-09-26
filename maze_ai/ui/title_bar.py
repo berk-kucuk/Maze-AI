@@ -1,76 +1,35 @@
-"""Custom frameless title bar: logo, title, backend badge, window controls."""
+"""Custom frameless title bar: chat title, model badge, tools, window controls.
+
+It sits over the chat column (the sidebar carries the brand), doubles as the
+window's drag handle, and a double-click maximizes like any native title bar.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QSize, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
-    QLabel,
+    QPushButton,
     QToolButton,
     QWidget,
 )
 
 from ..i18n import tr
-from .theme import LOGO_PATH, TEXT_DIM
-
-
-def _alarm_icon(color: str = TEXT_DIM, px: int = 20) -> QIcon:
-    """A monochrome alarm-clock icon drawn at runtime (no coloured emoji).
-
-    Face + two hands, two bells on top and two little feet — rendered in the
-    given colour so it matches the other monochrome title-bar controls.
-    """
-    ratio = 4  # supersample for crisp edges on hi-dpi
-    size = px * ratio
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    col = QColor(color)
-    pen = QPen(col)
-    pen.setWidthF(size * 0.065)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-
-    cx, cy = size * 0.5, size * 0.58
-    r = size * 0.29
-    off = r * 0.78
-
-    # bells (filled circles) at the top-left / top-right
-    br = size * 0.115
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(col))
-    for bx in (cx - off, cx + off):
-        p.drawEllipse(QPointF(bx, cy - off), br, br)
-
-    # clock face
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawEllipse(QPointF(cx, cy), r, r)
-
-    # feet
-    fl = size * 0.11
-    p.drawLine(QPointF(cx - off, cy + r * 0.75), QPointF(cx - off - fl, cy + r * 0.75 + fl))
-    p.drawLine(QPointF(cx + off, cy + r * 0.75), QPointF(cx + off + fl, cy + r * 0.75 + fl))
-
-    # hands
-    hp = QPen(col)
-    hp.setWidthF(size * 0.055)
-    hp.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(hp)
-    p.drawLine(QPointF(cx, cy), QPointF(cx, cy - r * 0.52))
-    p.drawLine(QPointF(cx, cy), QPointF(cx + r * 0.40, cy + r * 0.06))
-    p.end()
-    return QIcon(pm)
+from . import icons
+from .dialogs import with_shortcut
+from .sidebar import ElidedLabel
+from .theme import TEXT, TEXT_DIM
 
 
 class TitleBar(QWidget):
     minimize_clicked = Signal()
+    maximize_clicked = Signal()
     close_clicked = Signal()
     settings_clicked = Signal()
     sidebar_clicked = Signal()
     reminders_clicked = Signal()
+    shortcuts_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -78,67 +37,100 @@ class TitleBar(QWidget):
         self._drag_offset = None
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 12, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 0, 8, 0)
+        layout.setSpacing(4)
 
-        self.sidebar_btn = self._ctl_button("☰", tr("Toggle chat history"), "winctl")
+        self.sidebar_btn = self._icon_button(
+            "sidebar", with_shortcut(tr("Toggle chat history"), "Ctrl+B")
+        )
         self.sidebar_btn.clicked.connect(self.sidebar_clicked.emit)
         layout.addWidget(self.sidebar_btn)
+        layout.addSpacing(6)
 
-        logo = QLabel()
-        pix = QPixmap(LOGO_PATH)
-        if not pix.isNull():
-            logo.setPixmap(pix.scaled(26, 26, Qt.AspectRatioMode.KeepAspectRatio,
-                                      Qt.TransformationMode.SmoothTransformation))
-        logo.setFixedSize(30, 30)
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(logo)
+        self.title = ElidedLabel("")
+        self.title.setStyleSheet("font-size: 11pt; font-weight: 600; background: transparent;")
+        self.title.setMinimumWidth(80)
+        layout.addWidget(self.title, 1)
+        layout.addSpacing(8)
 
-        title = QLabel("Maze AI")
-        title.setStyleSheet("font-size: 12pt; font-weight: 700; letter-spacing: 0.5px;")
-        layout.addWidget(title)
+        # The model in use; clicking it opens Settings, where it is changed.
+        self.badge = QPushButton("")
+        self.badge.setObjectName("chip")
+        self.badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.badge.setIcon(icons.icon("sparkle", TEXT_DIM, 14))
+        self.badge.setIconSize(QSize(14, 14))
+        self.badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.badge.setToolTip(with_shortcut(tr("Change the model in Settings"), "Ctrl+,"))
+        self.badge.clicked.connect(self.settings_clicked.emit)
+        layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addSpacing(6)
 
-        self.badge = QLabel("")
-        self.badge.setStyleSheet(
-            f"color: {TEXT_DIM}; font-size: 9pt; "
-            "background: rgba(255,255,255,0.05); border-radius: 8px; padding: 3px 10px;"
+        self.reminders_btn = self._icon_button(
+            "alarm", with_shortcut(tr("Reminders"), "Ctrl+Shift+R")
         )
-        layout.addSpacing(4)
-        layout.addWidget(self.badge)
-
-        layout.addStretch(1)
-
-        self.reminders_btn = self._ctl_button("", tr("Reminders"), "winctl")
-        self.reminders_btn.setIcon(_alarm_icon())
-        self.reminders_btn.setIconSize(QSize(20, 20))
         self.reminders_btn.clicked.connect(self.reminders_clicked.emit)
         layout.addWidget(self.reminders_btn)
 
-        self.settings_btn = self._ctl_button("⚙", tr("Settings"), "winctl")
+        self.shortcuts_btn = self._icon_button(
+            "keyboard", with_shortcut(tr("Keyboard shortcuts"), "Ctrl+/")
+        )
+        self.shortcuts_btn.clicked.connect(self.shortcuts_clicked.emit)
+        layout.addWidget(self.shortcuts_btn)
+
+        self.settings_btn = self._icon_button("settings", with_shortcut(tr("Settings"), "Ctrl+,"))
         self.settings_btn.clicked.connect(self.settings_clicked.emit)
         layout.addWidget(self.settings_btn)
 
-        self.min_btn = self._ctl_button("﹣", tr("Minimize to tray"), "winctl")
+        sep = QFrame()
+        sep.setObjectName("vsep")
+        sep.setFixedHeight(18)
+        layout.addSpacing(6)
+        layout.addWidget(sep, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addSpacing(6)
+
+        self.min_btn = self._icon_button("minimize", tr("Minimize"), size=16)
         self.min_btn.clicked.connect(self.minimize_clicked.emit)
         layout.addWidget(self.min_btn)
 
-        self.close_btn = self._ctl_button("✕", tr("Hide to tray"), "winclose")
+        self.max_btn = self._icon_button("maximize", with_shortcut(tr("Maximize"), "F11"), size=14)
+        self.max_btn.clicked.connect(self.maximize_clicked.emit)
+        layout.addWidget(self.max_btn)
+
+        self.close_btn = self._icon_button(
+            "close", with_shortcut(tr("Hide to tray"), "Ctrl+W"), obj="winclose", size=16
+        )
         self.close_btn.clicked.connect(self.close_clicked.emit)
         layout.addWidget(self.close_btn)
 
-    def _ctl_button(self, glyph: str, tip: str, obj: str) -> QToolButton:
+    def _icon_button(self, name: str, tip: str, obj: str = "winctl", size: int = 18) -> QToolButton:
         btn = QToolButton()
-        btn.setObjectName(obj if obj == "winctl" else "winctl")
-        if obj == "winclose":
-            btn.setObjectName("winclose")
-        btn.setText(glyph)
+        btn.setObjectName(obj)
+        hover = "#ffffff" if obj == "winclose" else TEXT
+        btn.setIcon(icons.icon(name, TEXT_DIM, size, hover=hover))
+        btn.setIconSize(QSize(size, size))
         btn.setToolTip(tip)
         btn.setFixedSize(QSize(34, 34))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Hover tint needs the Active icon mode, which QToolButton only uses
+        # when it is auto-raised.
+        btn.setAutoRaise(True)
         return btn
 
     def set_backend_badge(self, text: str) -> None:
-        self.badge.setText(text)
+        self.badge.setText(f" {text}" if text else "")
+        self.badge.setVisible(bool(text))
+
+    def set_title(self, text: str) -> None:
+        self.title.setText(text)
+
+    def set_maximized(self, maximized: bool) -> None:
+        self.max_btn.setIcon(
+            icons.icon("restore" if maximized else "maximize", TEXT_DIM, 14, hover=TEXT)
+        )
+        self.max_btn.setToolTip(
+            with_shortcut(tr("Restore") if maximized else tr("Maximize"), "F11")
+        )
 
     # ── window dragging ──────────────────────────────────────────────────
     # Uses the compositor's native move (works on both Wayland and X11);
@@ -164,4 +156,6 @@ class TitleBar(QWidget):
         self._drag_offset = None
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.maximize_clicked.emit()
         event.accept()

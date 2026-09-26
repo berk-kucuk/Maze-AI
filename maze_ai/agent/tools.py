@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
+from ..private import private_dir, write_private
 from ..reminders import ReminderStore, parse_when
 from .safety import (
     PROTECTED_PATHS,
@@ -269,7 +270,8 @@ def _backup(path: Path, op: str = "write") -> str:
         if size > MAX_BACKUP_BYTES:
             raise TooLargeToBackUp(path, size)
 
-        _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        # Backups are verbatim copies of the user's files: owner-only.
+        private_dir(_BACKUP_DIR)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         dest = _BACKUP_DIR / f"{stamp}-{path.name}"
         if path.is_dir():
@@ -287,9 +289,7 @@ def _backup(path: Path, op: str = "write") -> str:
             "kind": "dir" if path.is_dir() else "file",
         })
         index = _prune_backups(index)
-        tmp = _BACKUP_INDEX.with_suffix(".tmp")
-        tmp.write_text(json.dumps(index, ensure_ascii=False, indent=1), "utf-8")
-        os.replace(tmp, _BACKUP_INDEX)
+        write_private(_BACKUP_INDEX, json.dumps(index, ensure_ascii=False, indent=1))
         return " (previous version backed up)"
     except OSError as exc:
         log.warning("could not back up %s: %s", path, exc)

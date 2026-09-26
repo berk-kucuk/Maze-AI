@@ -16,6 +16,7 @@ from maze_ai.ui.chat_view import (  # noqa: E402
     ChatView,
     CodeBlock,
     _Bubble,
+    source_text,
     split_code_blocks,
 )
 
@@ -62,7 +63,11 @@ def test_bubble_builds_a_code_widget(app):
 def test_bubble_without_code_uses_one_label(app):
     bubble = _Bubble("**bold** text", user=False)
     assert bubble._extra == []
-    assert bubble.label.textFormat() == Qt.TextFormat.MarkdownText
+    # Rendered by richtext.markdown_to_html (raw HTML off), not QLabel's own
+    # Markdown mode, which would pass HTML in the model's answer through.
+    assert bubble.label.textFormat() == Qt.TextFormat.RichText
+    assert "font-weight:700" in bubble.label.text()
+    assert source_text(bubble.label) == "**bold** text"
 
 
 def test_streaming_uses_plain_text_then_renders_markdown(app):
@@ -274,8 +279,8 @@ def body_order(bubble):
             continue
         if isinstance(widget, CodeBlock):
             out.append(("code", widget.code))
-        elif widget.text():
-            out.append(("text", widget.text()))
+        elif source_text(widget):
+            out.append(("text", source_text(widget)))
     return out
 
 

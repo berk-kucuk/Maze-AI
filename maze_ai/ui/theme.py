@@ -1,4 +1,11 @@
-"""Monochrome (black & white) theme: palette constants + global stylesheet."""
+"""Maze monochrome design system: tokens + the global stylesheet.
+
+Everything visual is derived from the tokens below, so the whole app shares
+one spacing scale, one set of radii and one type ramp. The look is OLED
+black with a restrained grey ladder; white is reserved for the one primary
+action on screen, and colour appears only where it carries meaning
+(success, danger, a link).
+"""
 
 from __future__ import annotations
 
@@ -6,27 +13,54 @@ from pathlib import Path
 
 RESOURCES = Path(__file__).resolve().parent.parent / "resources"
 LOGO_PATH = str(RESOURCES / "logo.png")
+# QSS needs files for its images; forward slashes work on every platform.
+_CHEVRON = (RESOURCES / "chevron-down.svg").as_posix()
+_CHECK = (RESOURCES / "check.svg").as_posix()
 
-# ── palette ──────────────────────────────────────────────────────────────
-BG = "#050505"          # near-black window base
-PANEL = "#0d0d0f"       # slightly lifted panels
-PANEL_HI = "#16161a"    # hover / raised
-LINE = "#26262b"        # hairline borders
-TEXT = "#f2f2f4"        # primary text (near-white)
-TEXT_DIM = "#8a8a92"    # secondary text
-TEXT_FAINT = "#5a5a62"  # tertiary
+# ── surfaces ─────────────────────────────────────────────────────────────
+BG = "#050506"            # window base
+SIDEBAR = "#09090b"       # the history rail, one step above the base
+PANEL = "#0e0e11"         # inputs, cards
+PANEL_HI = "#16161a"      # hover / raised
+PANEL_TOP = "#1d1d22"     # pressed / selected / user bubble
+LINE = "#232329"          # hairline borders
+LINE_HI = "#34343c"       # focused / hovered borders
+
+# ── text ─────────────────────────────────────────────────────────────────
+TEXT = "#ededf0"          # primary
+TEXT_DIM = "#9a9aa4"      # secondary
+TEXT_FAINT = "#5f5f69"    # tertiary, hints
 WHITE = "#ffffff"
-USER_BUBBLE = "#f4f4f6"     # user message: white bubble, dark text
-USER_TEXT = "#0a0a0a"
-AI_BUBBLE = "#131317"       # AI message: dark bubble, light text
-DANGER = "#ff5c5c"
-OK = "#7CFC9A"
 
-# QSS applied to the whole app. Frameless card corners are painted by the
-# AuroraCard widget, so most widgets here are transparent by design.
+# ── semantic ─────────────────────────────────────────────────────────────
+ACCENT = "#ffffff"        # the primary action
+DANGER = "#ff6b6b"
+DANGER_BG = "#2a1215"
+OK = "#6ee7a0"
+WARN = "#f5c451"
+LINK = "#9ec5ff"          # links must read as links, even in monochrome
+
+# ── messages ─────────────────────────────────────────────────────────────
+USER_BUBBLE = PANEL_TOP
+USER_TEXT = TEXT
+AI_BUBBLE = "transparent"
+
+# ── type ─────────────────────────────────────────────────────────────────
+FONT_UI = "'Inter', 'Inter Variable', 'Segoe UI', 'Noto Sans', sans-serif"
+FONT_MONO = "'JetBrains Mono', 'Fira Code', 'DejaVu Sans Mono', monospace"
+
+# ── radii ────────────────────────────────────────────────────────────────
+R_SM = 6
+R_MD = 10
+R_LG = 14
+R_XL = 20
+
+# QSS applied to the whole app (the QApplication and every top-level window).
+# Frameless card corners are painted by AuroraCard, so containers here are
+# transparent by design and only controls get a surface.
 STYLESHEET = f"""
 * {{
-    font-family: 'Inter', 'Segoe UI', 'Noto Sans', sans-serif;
+    font-family: {FONT_UI};
     outline: none;
     color: {TEXT};
 }}
@@ -37,36 +71,62 @@ QWidget {{
 }}
 
 QToolTip {{
-    background: {PANEL_HI};
+    background-color: {PANEL_HI};
     color: {TEXT};
-    border: 1px solid {LINE};
-    padding: 5px 8px;
-    border-radius: 6px;
+    border: 1px solid {LINE_HI};
+    padding: 6px 9px;
+    border-radius: {R_SM}px;
+    font-size: 9pt;
 }}
 
-/* ── scrollbars ── */
+/* ── menus (context menus, tray) — opaque, or they are unreadable ── */
+QMenu {{
+    background-color: #121216;
+    border: 1px solid {LINE_HI};
+    border-radius: {R_MD}px;
+    padding: 6px;
+}}
+QMenu::item {{
+    background-color: transparent;
+    padding: 7px 28px 7px 12px;
+    border-radius: {R_SM}px;
+    color: {TEXT};
+}}
+QMenu::item:selected {{ background-color: {PANEL_TOP}; }}
+QMenu::item:disabled {{ color: {TEXT_FAINT}; }}
+QMenu::separator {{ height: 1px; background: {LINE}; margin: 5px 8px; }}
+
+/* ── scrollbars: thin, quiet, grow on hover ── */
 QScrollBar:vertical {{
-    background: transparent; width: 10px; margin: 4px 2px 4px 0;
+    background: transparent; width: 10px; margin: 2px 1px 2px 0;
 }}
 QScrollBar::handle:vertical {{
-    background: {LINE}; border-radius: 5px; min-height: 32px;
+    background: {LINE}; border-radius: 4px; min-height: 36px; margin: 0 2px;
 }}
-QScrollBar::handle:vertical:hover {{ background: #3a3a42; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+QScrollBar::handle:vertical:hover {{ background: {LINE_HI}; margin: 0; }}
+QScrollBar:horizontal {{
+    background: transparent; height: 10px; margin: 0 2px 1px 2px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {LINE}; border-radius: 4px; min-width: 36px; margin: 2px 0;
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
 /* ── inputs ── */
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{
     background: {PANEL};
     border: 1px solid {LINE};
-    border-radius: 10px;
+    border-radius: {R_MD}px;
     padding: 8px 12px;
-    selection-background-color: {WHITE};
-    selection-color: {BG};
+    selection-background-color: #3b3b44;
+    selection-color: {WHITE};
 }}
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border-color: {LINE_HI}; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
-    border: 1px solid #4a4a52;
+    border: 1px solid #5a5a64;
 }}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{ color: {TEXT_FAINT}; }}
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: center right;
@@ -74,85 +134,127 @@ QComboBox::drop-down {{
     width: 28px;
 }}
 QComboBox::down-arrow {{
-    image: none;
-    width: 0;
-    height: 0;
-    border-left: 5px solid transparent;
-    border-right: 5px solid transparent;
-    border-top: 7px solid {TEXT};
+    image: url("{_CHEVRON}");
+    width: 12px;
+    height: 12px;
     margin-right: 10px;
 }}
-QComboBox::down-arrow:hover {{ border-top-color: {WHITE}; }}
 /* Dropdown popup — must be fully opaque or the list is unreadable over the
    translucent window. Use solid background-color (not the shorthand). */
 QComboBox QAbstractItemView {{
-    background-color: #14141a;
-    border: 1px solid {LINE};
-    border-radius: 8px;
-    selection-background-color: {WHITE};
-    selection-color: {BG};
+    background-color: #121216;
+    border: 1px solid {LINE_HI};
+    border-radius: {R_MD}px;
+    selection-background-color: {PANEL_TOP};
+    selection-color: {WHITE};
     outline: none;
     padding: 4px;
 }}
 QComboBox QAbstractItemView::item {{
     background-color: transparent;
     border: none;
-    border-radius: 6px;
-    min-height: 26px;
+    border-radius: {R_SM}px;
+    min-height: 28px;
     padding: 3px 8px;
     color: {TEXT};
 }}
 QComboBox QAbstractItemView::item:selected,
 QComboBox QAbstractItemView::item:hover {{
-    background-color: {WHITE};
-    color: {BG};
+    background-color: {PANEL_TOP};
+    color: {WHITE};
 }}
 
 /* ── buttons ── */
 QPushButton {{
     background: {PANEL_HI};
     border: 1px solid {LINE};
-    border-radius: 10px;
+    border-radius: {R_MD}px;
     padding: 8px 16px;
     color: {TEXT};
+    font-weight: 500;
 }}
-QPushButton:hover {{ background: #202027; border-color: #3a3a42; }}
-QPushButton:pressed {{ background: #0f0f13; }}
-QPushButton:disabled {{ color: {TEXT_FAINT}; background: {PANEL}; }}
+QPushButton:hover {{ background: #1f1f25; border-color: {LINE_HI}; }}
+QPushButton:pressed {{ background: #101014; }}
+QPushButton:focus {{ border-color: #6a6a74; }}
+QPushButton:disabled {{ color: {TEXT_FAINT}; background: {PANEL}; border-color: {LINE}; }}
 
 QPushButton#primary {{
-    background: {WHITE};
+    background: {ACCENT};
     color: {BG};
-    border: none;
-    font-weight: 700;
+    border: 1px solid {ACCENT};
+    font-weight: 600;
 }}
-QPushButton#primary:hover {{ background: #e2e2e6; }}
+QPushButton#primary:hover {{ background: #e6e6ea; border-color: #e6e6ea; }}
 QPushButton#primary:pressed {{ background: #cfcfd4; }}
-QPushButton#primary:disabled {{ background: #3a3a42; color: {TEXT_FAINT}; }}
+QPushButton#primary:focus {{ border: 2px solid #8a8a94; }}
+QPushButton#primary:disabled {{ background: #2c2c33; border-color: #2c2c33; color: {TEXT_FAINT}; }}
 
-QPushButton#danger {{ color: {DANGER}; border-color: #4a2a2a; }}
-QPushButton#danger:hover {{ background: #241414; }}
+QPushButton#danger {{ color: {DANGER}; border-color: #4a2328; background: transparent; }}
+QPushButton#danger:hover {{ background: {DANGER_BG}; border-color: #6b2c33; }}
 
-/* ── titlebar window controls ── */
-QToolButton#winctl {{
-    background: transparent; border: none; border-radius: 8px;
-    color: {TEXT_DIM}; font-size: 14pt; padding: 0;
+QPushButton#ghost {{ background: transparent; border: 1px solid transparent; color: {TEXT_DIM}; }}
+QPushButton#ghost:hover {{ background: {PANEL_HI}; color: {TEXT}; }}
+
+QPushButton#chip {{
+    background: rgba(255,255,255,0.04);
+    border: 1px solid {LINE};
+    border-radius: 13px;
+    padding: 4px 12px;
+    color: {TEXT_DIM};
+    font-size: 9pt;
+    font-weight: 500;
 }}
-QToolButton#winctl:hover {{ background: {PANEL_HI}; color: {TEXT}; }}
-QToolButton#winclose:hover {{ background: #3a1414; color: {DANGER}; }}
+QPushButton#chip:hover {{ background: rgba(255,255,255,0.08); color: {TEXT}; border-color: {LINE_HI}; }}
 
-QCheckBox {{ spacing: 8px; }}
+/* ── icon buttons (title bar, toolbars) ── */
+QToolButton#winctl, QToolButton#winclose, QToolButton#icon {{
+    background: transparent; border: none; border-radius: {R_SM + 2}px;
+    color: {TEXT_DIM}; font-size: 13pt; padding: 0;
+}}
+QToolButton#winctl:hover, QToolButton#icon:hover {{ background: {PANEL_HI}; color: {TEXT}; }}
+QToolButton#winctl:pressed, QToolButton#icon:pressed {{ background: {PANEL_TOP}; }}
+QToolButton#winctl:checked, QToolButton#icon:checked {{ background: {PANEL_HI}; color: {TEXT}; }}
+QToolButton#winclose:hover {{ background: #c42b1c; color: {WHITE}; }}
+QToolButton#winctl:disabled, QToolButton#icon:disabled {{ color: #34343a; }}
+
+/* Small text actions under messages and code blocks. */
+QToolButton#action {{
+    background: transparent; border: none; border-radius: {R_SM}px;
+    color: {TEXT_FAINT}; font-size: 9pt; padding: 3px 7px;
+}}
+QToolButton#action:hover {{ color: {TEXT}; background: rgba(255,255,255,0.07); }}
+
+QCheckBox {{ spacing: 9px; }}
 QCheckBox::indicator {{
     width: 18px; height: 18px; border-radius: 5px;
-    border: 1px solid {LINE}; background: {PANEL};
+    border: 1px solid {LINE_HI}; background: {PANEL};
 }}
-QCheckBox::indicator:checked {{ background: {WHITE}; border-color: {WHITE}; }}
+QCheckBox::indicator:hover {{ border-color: #5a5a64; }}
+QCheckBox::indicator:checked {{
+    background: {WHITE}; border-color: {WHITE}; image: url("{_CHECK}");
+}}
 
-QLabel#h1 {{ font-size: 15pt; font-weight: 700; }}
+QProgressBar {{
+    background: {PANEL}; border: 1px solid {LINE}; border-radius: 5px;
+    height: 8px; text-align: center; color: transparent;
+}}
+QProgressBar::chunk {{ background: {WHITE}; border-radius: 4px; }}
+
+QLabel#h1 {{ font-size: 16pt; font-weight: 700; letter-spacing: -0.2px; }}
+QLabel#h2 {{ font-size: 12pt; font-weight: 600; }}
 QLabel#dim {{ color: {TEXT_DIM}; }}
 QLabel#faint {{ color: {TEXT_FAINT}; font-size: 9pt; }}
+QLabel#section {{
+    color: {TEXT_FAINT}; font-size: 8pt; font-weight: 700; letter-spacing: 0.8px;
+}}
+QLabel#kbd {{
+    background: {PANEL_HI}; border: 1px solid {LINE_HI}; border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 6px; color: {TEXT_DIM};
+    font-family: {FONT_MONO}; font-size: 8.5pt;
+}}
 
-QFrame#hsep {{ background: {LINE}; max-height: 1px; border: none; }}
+QFrame#hsep {{ background: {LINE}; max-height: 1px; min-height: 1px; border: none; }}
+QFrame#vsep {{ background: {LINE}; max-width: 1px; min-width: 1px; border: none; }}
 
 QTabWidget::pane {{ border: none; }}
 QTabBar::tab {{

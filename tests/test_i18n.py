@@ -68,10 +68,43 @@ def test_every_approval_reason_is_translated(reason):
     assert reason in i18n.TURKISH
 
 
-def test_the_welcome_message_is_translated():
-    from maze_ai.ui.main_window import WELCOME  # noqa: PLC0415 - avoids a Qt import at module load
+def test_the_first_screen_is_translated():
+    from maze_ai.ui.main_window import (  # noqa: PLC0415 - avoids a Qt import at module load
+        EMPTY_SUBTITLE,
+        EMPTY_TITLE,
+        SUGGESTIONS,
+    )
 
-    assert WELCOME in i18n.TURKISH
+    assert EMPTY_TITLE in i18n.TURKISH
+    assert EMPTY_SUBTITLE in i18n.TURKISH
+    for _icon, label, prompt in SUGGESTIONS:
+        assert label in i18n.TURKISH and prompt in i18n.TURKISH
+
+
+def test_every_literal_ui_string_is_translated():
+    # A new button or tool tip without a Turkish entry shows up as English in
+    # the middle of a Turkish interface.
+    import ast
+    from pathlib import Path
+
+    missing = []
+    for path in (Path(i18n.__file__).parent / "ui").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "tr"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value not in i18n.TURKISH
+            ):
+                missing.append(f"{path.name}: {node.args[0].value!r}")
+    assert missing == []
+
+
+def test_history_groups_are_translated():
+    for group in ("Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older"):
+        assert group in i18n.TURKISH
 
 
 def test_no_translation_is_left_empty():

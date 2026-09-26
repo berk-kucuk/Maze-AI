@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
 
 from ..i18n import tr
 from ..reminders import ReminderStore, parse_when
+from . import icons
 from .effects import AuroraCard
+from .richtext import harden_labels, plain_label
 from .theme import DANGER, LINE, STYLESHEET, TEXT, TEXT_DIM, TEXT_FAINT
 
 
@@ -29,7 +31,7 @@ class RemindersDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
-        self.resize(460, 520)
+        self.resize(520, 560)
         self.setStyleSheet(STYLESHEET)
 
         root = QVBoxLayout(self)
@@ -38,7 +40,8 @@ class RemindersDialog(QDialog):
         root.addWidget(card)
 
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(30, 26, 30, 26)
+        lay.setContentsMargins(card.margin + 22, card.margin + 18,
+                               card.margin + 22, card.margin + 20)
         lay.setSpacing(14)
 
         header = QHBoxLayout()
@@ -47,9 +50,12 @@ class RemindersDialog(QDialog):
         header.addWidget(title)
         header.addStretch(1)
         close = QToolButton()
-        close.setObjectName("winclose")
-        close.setText("✕")
-        close.setFixedSize(34, 34)
+        close.setObjectName("icon")
+        close.setIcon(icons.icon("close", TEXT_DIM, 16, hover=TEXT))
+        close.setIconSize(QSize(16, 16))
+        close.setAutoRaise(True)
+        close.setToolTip(tr("Close") + "  (Esc)")
+        close.setFixedSize(32, 32)
         close.setCursor(Qt.CursorShape.PointingHandCursor)
         close.clicked.connect(self.accept)
         header.addWidget(close)
@@ -59,10 +65,12 @@ class RemindersDialog(QDialog):
         add_row = QHBoxLayout()
         self.text_in = QLineEdit()
         self.text_in.setPlaceholderText(tr("Remind me to…"))
+        self.text_in.returnPressed.connect(self._add)
         add_row.addWidget(self.text_in, 1)
         self.when_in = QLineEdit()
         self.when_in.setPlaceholderText(tr("in 30 minutes"))
         self.when_in.setFixedWidth(130)
+        self.when_in.returnPressed.connect(self._add)
         add_row.addWidget(self.when_in)
         add_btn = QPushButton(tr("Add"))
         add_btn.setObjectName("primary")
@@ -89,6 +97,8 @@ class RemindersDialog(QDialog):
         lay.addWidget(scroll, 1)
 
         self._reload()
+        harden_labels(self)
+        self.text_in.setFocus()
 
     def _add(self) -> None:
         text = self.text_in.text().strip()
@@ -137,16 +147,20 @@ class RemindersDialog(QDialog):
         h.setContentsMargins(12, 8, 8, 8)
         col = QVBoxLayout()
         col.setSpacing(2)
-        t = QLabel(text)
+        # Reminder text is often written by the agent: plain text only.
+        t = plain_label(text)
         t.setWordWrap(True)
         t.setStyleSheet(f"color: {TEXT}; background: transparent; font-size: 10pt;")
         col.addWidget(t)
-        w = QLabel(f"⏰ {when}")
+        w = plain_label(f"⏰ {when}")
         w.setStyleSheet(f"color: {TEXT_DIM}; background: transparent; font-size: 8.5pt;")
         col.addWidget(w)
         h.addLayout(col, 1)
         rm = QToolButton()
-        rm.setText("✕")
+        rm.setIcon(icons.icon("trash", TEXT_FAINT, 15, hover=DANGER))
+        rm.setIconSize(QSize(15, 15))
+        rm.setAutoRaise(True)
+        rm.setToolTip(tr("Delete"))
         rm.setObjectName("chatdel")
         rm.setFixedSize(24, 24)
         rm.setCursor(Qt.CursorShape.PointingHandCursor)

@@ -40,10 +40,13 @@ from ..config import Config
 from ..i18n import tr
 from ..llm import build_backend
 from .approval import ApprovalDialog
+from . import icons
 from .chat_view import _Bubble
+from .dialogs import shortcut_text
 from .effects import MARGIN as CARD_MARGIN
 from .effects import AuroraCard, GlowDot
 from .input_bar import _Composer
+from .richtext import harden_labels, plain_label
 from .theme import LINE, STYLESHEET, TEXT, TEXT_DIM, TEXT_FAINT
 from .worker import AgentWorker
 
@@ -194,12 +197,11 @@ class QuickAsk(QDialog):
 
         # A glyph rather than the app icon: the logo carries its own black
         # plate, which inside a rounded field looks like a hole punched in it.
-        mark = QLabel("✦")
-        mark.setFixedWidth(18)
+        mark = QLabel()
+        mark.setPixmap(icons.pixmap("sparkle", TEXT_DIM, 18))
+        mark.setFixedWidth(20)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mark.setStyleSheet(
-            f"color: {TEXT_DIM}; font-size: 13pt; background: transparent;"
-        )
+        mark.setStyleSheet("background: transparent;")
         row.addWidget(mark, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.composer = _AskInput()
@@ -236,7 +238,8 @@ class QuickAsk(QDialog):
         self.body.hide()
 
         # ── context strip (clipboard text / attached capture / files) ────
-        self.context_label = QLabel("")
+        # Clipboard text and file names: shown literally, never as markup.
+        self.context_label = plain_label("")
         self.context_label.setWordWrap(True)
         self.context_label.setStyleSheet(
             f"color: {TEXT_DIM}; font-size: 9pt; background: rgba(255,255,255,0.04);"
@@ -294,20 +297,30 @@ class QuickAsk(QDialog):
         footer = QHBoxLayout(self.footer)
         footer.setContentsMargins(6, 9, 2, 0)
         footer.setSpacing(10)
-        self.hint = QLabel(tr("Enter to ask  ·  Esc to close"))
+        self.hint = plain_label(tr("Enter to ask  ·  Esc to close"))
         self.hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 8.5pt;")
         footer.addWidget(self.hint)
-        self.status = QLabel("")
+        self.status = plain_label("")
         self.status.setStyleSheet(f"color: {TEXT_DIM}; font-size: 8.5pt;")
         footer.addWidget(self.status, 1, Qt.AlignmentFlag.AlignRight)
         self.copy_btn = self._footer_button(tr("⧉ Copy"), self._copy)
+        self.copy_btn.setToolTip(shortcut_text("Ctrl+Shift+C"))
         footer.addWidget(self.copy_btn)
         self.chat_btn = self._footer_button(tr("Continue in chat →"), self._to_chat)
+        self.chat_btn.setToolTip(shortcut_text("Ctrl+Shift+Return"))
         footer.addWidget(self.chat_btn)
         lay.addWidget(self.footer)
 
         QShortcut(QKeySequence("Escape"), self, activated=self.close)
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.send)
+        QShortcut(QKeySequence("Ctrl+Shift+C"), self, activated=self._copy_if_any)
+        QShortcut(QKeySequence("Ctrl+Shift+Return"), self, activated=self._to_chat_if_any)
+        # Alt+1…4 run the clipboard actions (Explain, Fix, Translate, Summarise).
+        for index in range(len(CLIPBOARD_ACTIONS)):
+            QShortcut(QKeySequence(f"Alt+{index + 1}"), self,
+                      activated=lambda i=index: self._run_action(i))
+        self._action_buttons: list[QPushButton] = []
+        harden_labels(self)
 
         # Let the layout say how tall the empty bar has to be, rather than
         # trusting arithmetic that a font change would quietly invalidate.
@@ -425,8 +438,11 @@ class QuickAsk(QDialog):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
-        for label, template in CLIPBOARD_ACTIONS:
+        self._action_buttons = []
+        for number, (label, template) in enumerate(CLIPBOARD_ACTIONS, start=1):
             button = QPushButton(tr(label))
+            button.setToolTip(shortcut_text(f"Alt+{number}"))
+            self._action_buttons.append(button)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setFixedHeight(30)
             button.setStyleSheet(
@@ -444,6 +460,18 @@ class QuickAsk(QDialog):
         self.actions_row.addStretch(1)
         self.actions_widget.show()
         self._resize_to(self.width(), 210)
+
+    def _run_action(self, index: int) -> None:
+        if self.actions_widget.isVisible() and index < len(self._action_buttons):
+            self._action_buttons[index].click()
+
+    def _copy_if_any(self) -> None:
+        if self._answer:
+            self._copy()
+
+    def _to_chat_if_any(self) -> None:
+        if self._question and self._answer and not (self.worker and self.worker.isRunning()):
+            self._to_chat()
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)
@@ -551,6 +579,7 @@ class QuickAsk(QDialog):
             self.set_status(" ".join((ev.text or "").split())[:80])
 
     def _on_approval(self, request: ApprovalRequest) -> None:
+        self.surface()
         dialog = ApprovalDialog(request, self)
         approved = dialog.exec() == QDialog.DialogCode.Accepted
         if self.worker:

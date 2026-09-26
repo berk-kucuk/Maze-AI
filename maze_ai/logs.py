@@ -14,6 +14,8 @@ import os
 import sys
 from pathlib import Path
 
+from .private import private_dir
+
 STATE_DIR = (
     Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "maze-ai"
 )
@@ -38,7 +40,7 @@ def setup(debug: bool = False) -> Path | None:
 
     path: Path | None = None
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        private_dir(STATE_DIR)
         handler = logging.handlers.RotatingFileHandler(
             LOG_FILE, maxBytes=_MAX_BYTES, backupCount=_BACKUPS, encoding="utf-8"
         )

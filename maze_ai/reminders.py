@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .private import private_dir, tighten, write_private
+
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "maze-ai"
 REMINDERS_FILE = DATA_DIR / "reminders.json"
 
@@ -140,7 +142,9 @@ def parse_when(text: str, now: float | None = None) -> float | None:
 
 class ReminderStore:
     def __init__(self) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        private_dir(DATA_DIR)
+        if REMINDERS_FILE.exists():
+            tighten(REMINDERS_FILE)
         self._items: list[Reminder] = []
         self.load()
 
@@ -152,11 +156,8 @@ class ReminderStore:
             self._items = []
 
     def save(self) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = REMINDERS_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps([r.to_dict() for r in self._items],
-                                  ensure_ascii=False, indent=2), "utf-8")
-        os.replace(tmp, REMINDERS_FILE)
+        write_private(REMINDERS_FILE, json.dumps([r.to_dict() for r in self._items],
+                                                  ensure_ascii=False, indent=2))
 
     def add(self, text: str, due: float) -> Reminder:
         r = Reminder(text=text, due=due)

@@ -5,10 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import socket
+import stat
+import struct
 import sys
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
@@ -16,7 +19,7 @@ from . import autostart, logs
 from .config import Config
 from .i18n import set_language, tr
 from .ui.main_window import MainWindow
-from .ui.theme import LOGO_PATH
+from .ui.theme import LOGO_PATH, STYLESHEET
 from .ui.tray import Tray
 
 log = logging.getLogger(__name__)
@@ -69,7 +72,48 @@ def _flag_value(argv: list[str], flag: str) -> str:
 # Per-user single-instance rendezvous socket. A second launch connects to this,
 # asks the running instance to surface its window, and exits — so the app never
 # spawns a duplicate window or tray icon.
-_INSTANCE_KEY = f"maze-ai-{os.getuid()}"
+#
+# The socket is a control channel: an "ask:" message makes the assistant act
+# on its text. So it lives in the user's private runtime directory (0700,
+# owned by them) rather than the shared /tmp, is created owner-only, and every
+# connection's peer is checked to be this same user.
+
+
+def _instance_key() -> str:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    try:
+        info = os.stat(runtime) if runtime else None
+    except OSError:
+        info = None
+    if (
+        info is not None
+        and stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and not info.st_mode & 0o077
+    ):
+        return os.path.join(runtime, "maze-ai.sock")
+    return f"maze-ai-{os.getuid()}"
+
+
+_INSTANCE_KEY = _instance_key()
+
+#: Longest instance message accepted (a --file selection can be long, but not
+#: this long). Anything bigger is dropped rather than buffered without bound.
+_MAX_MESSAGE = 256 * 1024
+
+
+def _peer_uid(conn: QLocalSocket) -> int | None:
+    """The uid on the other end of a local socket (Linux SO_PEERCRED)."""
+    fd = int(conn.socketDescriptor())
+    if fd < 0 or not hasattr(socket, "SO_PEERCRED"):
+        return None
+    try:
+        with socket.socket(fileno=os.dup(fd)) as peer:
+            raw = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        _pid, uid, _gid = struct.unpack("3i", raw)
+        return uid
+    except OSError:
+        return None
 
 
 def _activate_running_instance(message: str = "show") -> bool:
@@ -214,6 +258,13 @@ def main() -> int:
     app.setDesktopFileName("maze-ai")
     app.setWindowIcon(QIcon(LOGO_PATH))
     app.setQuitOnLastWindowClosed(False)  # keep running in the tray
+    font = QFont("Inter")
+    font.setStyleHint(QFont.StyleHint.SansSerif)
+    font.setPointSizeF(10.5)
+    font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+    app.setFont(font)
+    # App-wide, so menus, tool tips and file dialogs match the windows.
+    app.setStyleSheet(STYLESHEET)
 
     # Single instance: hand our request to it and bow out.
     request = _request_from(argv)
@@ -233,19 +284,34 @@ def main() -> int:
     # listen: later launches connect here and we raise the window instead.
     QLocalServer.removeServer(_INSTANCE_KEY)
     instance_server = QLocalServer(app)
+    instance_server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
 
     def _on_second_launch() -> None:
         conn = instance_server.nextPendingConnection()
         if conn is None:
-            _surface(window)
             return
+        uid = _peer_uid(conn)
+        if uid is not None and uid != os.getuid():
+            log.warning("refused an instance message from uid %s", uid)
+            conn.abort()
+            conn.deleteLater()
+            return
+        buffer = bytearray()
 
         def _read() -> None:
-            message = bytes(conn.readAll().data()).decode("utf-8", "replace")
-            _dispatch(window, message)
+            buffer.extend(bytes(conn.readAll().data()))
+            if len(buffer) > _MAX_MESSAGE:
+                log.warning("dropped an oversized instance message")
+                buffer.clear()
+                conn.abort()
+
+        def _done() -> None:
+            if buffer:
+                _dispatch(window, bytes(buffer).decode("utf-8", "replace"))
+            conn.deleteLater()
 
         conn.readyRead.connect(_read)
-        conn.disconnected.connect(conn.deleteLater)
+        conn.disconnected.connect(_done)
 
     instance_server.newConnection.connect(_on_second_launch)
     instance_server.listen(_INSTANCE_KEY)

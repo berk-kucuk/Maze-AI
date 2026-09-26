@@ -72,15 +72,6 @@ TURKISH: dict[str, str] = {
     "Re-run the last message": "Son mesajı yeniden çalıştır",
     "Action denied by user.": "İşlem kullanıcı tarafından reddedildi.",
     "{count} image(s) attached": "{count} görsel eklendi",
-    "**Maze AI** is ready. I can run commands, manage files, launch apps, fetch "
-    "web pages, send notifications and set reminders on Maze Linux.\n\nTry: "
-    "*“show my disk usage”*, *“open firefox”*, *“create a python venv in ~/dev”* "
-    "or *“remind me to take a break in 30 minutes”*.":
-        "**Maze AI** hazır. Maze Linux üzerinde komut çalıştırabilir, dosyaları "
-        "yönetebilir, uygulama açabilir, web sayfası getirebilir, bildirim "
-        "gönderebilir ve hatırlatıcı kurabilirim.\n\nDeneyin: *“disk kullanımımı "
-        "göster”*, *“firefox'u aç”*, *“~/dev içinde python venv oluştur”* ya da "
-        "*“30 dakika sonra mola vermemi hatırlat”*.",
     # ── file manager ──────────────────────────────────────────────────────
     "Maze AI": "Maze AI",
     "Ask about this": "Bunu sor",
@@ -442,6 +433,97 @@ TURKISH: dict[str, str] = {
         "istek onay ister; böylece asistanın okuduğu bir içerik onu "
         "verilerinizi bir yere göndermeye ikna edemez.",
     "Auto  ·  match my system": "Otomatik  ·  sistemimle aynı",
+    # ── 1.18: redesigned interface ────────────────────────────────────────
+    "How can I help?": "Nasıl yardımcı olabilirim?",
+    "Commands, files, apps, the web and reminders on Maze Linux — "
+    "anything that changes your system asks you first.":
+        "Maze Linux'ta komutlar, dosyalar, uygulamalar, web ve hatırlatıcılar — "
+        "sisteminizi değiştiren her şey önce size sorulur.",
+    "Show my disk usage": "Disk kullanımımı göster",
+    "Show my disk usage and the biggest folders in my home.":
+        "Disk kullanımımı ve ev dizinimdeki en büyük klasörleri göster.",
+    "Open Firefox": "Firefox'u aç",
+    "Open Firefox.": "Firefox'u aç.",
+    "Create a Python venv in ~/dev": "~/dev içinde Python venv oluştur",
+    "Create a Python virtual environment in ~/dev/venv.":
+        "~/dev/venv içinde bir Python sanal ortamı oluştur.",
+    "Remind me to take a break in 30 minutes": "30 dakika sonra mola vermemi hatırlat",
+    "Remind me to take a break in 30 minutes.": "30 dakika sonra mola vermemi hatırlat.",
+    "Press {keys} to see every keyboard shortcut.":
+        "Tüm klavye kısayollarını görmek için {keys} tuşlarına basın.",
+    "{keys} for shortcuts": "Kısayollar: {keys}",
+    "Message Maze AI…": "Maze AI'a mesaj yazın…",
+    "Enter to send · Shift+Enter for a new line": "Enter gönderir · Shift+Enter yeni satır",
+    "Working… Esc to stop": "Çalışıyor… durdurmak için Esc",
+    "Copy": "Kopyala",
+    "Copied": "Kopyalandı",
+    "Copy code": "Kodu kopyala",
+    "Copy the answer": "Yanıtı kopyala",
+    "Regenerate": "Yeniden üret",
+    "Show more": "Devamını göster",
+    "Show less": "Daha az göster",
+    "Jump to the latest message": "Son mesaja git",
+    "Answer copied": "Yanıt kopyalandı",
+    "Chat deleted": "Sohbet silindi",
+    "Delete this chat?": "Bu sohbet silinsin mi?",
+    "It will be removed from your history. This can't be undone.":
+        "Geçmişinizden kaldırılacak. Bu işlem geri alınamaz.",
+    "Delete": "Sil",
+    "Rename": "Yeniden adlandır",
+    "Export to Markdown": "Markdown olarak dışa aktar",
+    "More": "Diğer",
+    "double-click to rename": "yeniden adlandırmak için çift tıklayın",
+    "just now": "az önce",
+    "{n} min ago": "{n} dk önce",
+    "{n} h ago": "{n} sa önce",
+    "{n} d ago": "{n} gün önce",
+    "Today": "Bugün",
+    "Yesterday": "Dün",
+    "Previous 7 days": "Son 7 gün",
+    "Previous 30 days": "Son 30 gün",
+    "Older": "Daha eski",
+    "Wait for the answer to finish, or press Esc to stop it.":
+        "Yanıtın bitmesini bekleyin ya da durdurmak için Esc'e basın.",
+    "Minimize": "Küçült",
+    "Maximize": "Büyüt",
+    "Restore": "Önceki boyut",
+    "Close": "Kapat",
+    "Change the model in Settings": "Modeli Ayarlar'dan değiştirin",
+    "Keyboard shortcuts": "Klavye kısayolları",
+    "Everything in Maze AI can be done without the mouse.":
+        "Maze AI'daki her şey fare olmadan yapılabilir.",
+    "or": "veya",
+    "OK": "Tamam",
+    "Chats": "Sohbetler",
+    "Messages": "Mesajlar",
+    "Window": "Pencere",
+    "Anywhere on the desktop": "Masaüstünün her yerinde",
+    "Approval dialog": "Onay penceresi",
+    "Search chats": "Sohbetlerde ara",
+    "Previous / next chat": "Önceki / sonraki sohbet",
+    "Show / hide history": "Geçmişi göster / gizle",
+    "New line": "Yeni satır",
+    "Stop generating": "Üretimi durdur",
+    "Regenerate the last answer": "Son yanıtı yeniden üret",
+    "Copy the last answer": "Son yanıtı kopyala",
+    "Edit the last message": "Son mesajı düzenle",
+    "Focus the message box": "Mesaj kutusuna odaklan",
+    "Scroll the conversation": "Sohbeti kaydır",
+    "Maximize / restore": "Büyüt / önceki boyut",
+    "Hide the window": "Pencereyi gizle",
+    "Quit Maze AI": "Maze AI'dan çık",
+    "Continue in chat": "Sohbette devam et",
+    "Clipboard actions": "Pano işlemleri",
+    "Approve": "Onayla",
+    "Always allow this command": "Bu komuta her zaman izin ver",
+    "Approval required": "Onay gerekiyor",
+    "{approve} approve · {deny} deny": "{approve} onayla · {deny} reddet",
+    "Open this link?": "Bu bağlantı açılsın mı?",
+    "It will open in your browser. Make sure you trust the address:":
+        "Tarayıcınızda açılacak. Adrese güvendiğinizden emin olun:",
+    "Open link": "Bağlantıyı aç",
+    "Blocked a link that isn't a web address.":
+        "Web adresi olmayan bir bağlantı engellendi.",
 }
 
 _CATALOGS: dict[str, dict[str, str]] = {"tr": TURKISH}

@@ -87,6 +87,7 @@ DEFAULTS: dict[str, Any] = {
     "autostart": True,                # launch on login (into the tray)
     "start_hidden": False,            # start minimized to tray
     "close_to_tray": True,
+    "sidebar_visible": True,          # chat history rail shown (Ctrl+B)
     "greet_on_start": True,           # send a greeting notification on launch
     "onboarded": False,               # first-run wizard has been completed
 }

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maze-ai"
-version = "1.17.1"
+version = "1.18.0"
 description = "Agentic AI assistant for Maze Linux — local models via Ollama, native tool calling, monochrome UI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,10 +34,13 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-"maze_ai.resources" = ["*.png"]
+"maze_ai.resources" = ["*.png", "*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Test the working tree, never an installed copy of maze_ai that happens to be
+# on sys.path (pytest puts tests/ first, so the system package would win).
+pythonpath = ["."]
 filterwarnings = ["error::DeprecationWarning"]
 
 [tool.ruff]

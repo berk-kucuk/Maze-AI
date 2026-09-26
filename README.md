@@ -4,7 +4,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.12.0-blue)
+![Version](https://img.shields.io/badge/version-1.18.0-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0--or--later-green)
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Qt](https://img.shields.io/badge/Qt-6.6+-teal)
@@ -14,42 +14,72 @@
 ## Features
 
 - **Local-first**: All processing on your machine via Ollama. No account, no tracking, no cloud.
-- **Native GUI**: Fast, responsive PySide6 interface with monochrome aurora theme and animated glass-morphism effects.
+- **Native GUI**: Fast PySide6 interface in the Maze monochrome design — history grouped by date, a centred reading column, crisp vector icons, and a frameless window you can resize, maximize and drag.
 - **Agentic**: Tools for reading the clipboard, files, directories, your shell history, and capturing the screen.
 - **Turkish native**: Full support for Turkish language detection (morphological suffix analysis), UI translation, and prompt responses in Turkish.
 - **60 FPS streaming**: Token-by-token response animation at frame-perfect cadence — no visible lumps or jumps in text reveal.
 - **"Quick Ask"**: Copy text → hit the hotkey → get an answer. One-button clipboard actions: Explain, Fix, Translate, Summarize.
 - **Vision ready**: Supports vision models (e.g., `llava`) when you read the screen or paste images.
-- **Keyboard-first**: Global hotkey to activate, Escape to close, Enter to ask, Ctrl+L to clear — mouse-optional.
+- **Keyboard-first**: every action has a shortcut — press **Ctrl+/** in the app for the full list. See [Keyboard shortcuts](#keyboard-shortcuts).
+- **Safe by design**: model output never renders as HTML, links open only after you see the real address, and chats, backups and pasted screenshots are stored owner-only (0600/0700).
 
 ## Install
 
-### AUR (Arch Linux)
+### From the Maze repository
+
+**On Maze Linux** the repository is already configured:
 
 ```bash
-yay -S maze-ai
+sudo pacman -S maze-ai
 ```
 
-or
+**On Arch Linux and Arch-based distributions**, add the repository once:
+
+1. Import and trust the Maze signing key:
+
+   ```bash
+   curl -O https://mazerepo.berkkucukk.com.tr/packages/mazelinux.gpg
+   gpg --show-keys --with-fingerprint mazelinux.gpg
+   sudo pacman-key --add mazelinux.gpg
+   sudo pacman-key --lsign-key 7C4D515A6B930CB04794CEF6147C8159B3E2EE5F
+   ```
+
+   The fingerprint `gpg` prints must be `7C4D 515A 6B93 0CB0 4794  CEF6 147C 8159 B3E2 EE5F`.
+
+2. Add the repository to the end of `/etc/pacman.conf`:
+
+   ```ini
+   [mazelinux]
+   SigLevel = Required DatabaseOptional
+   Server = https://mazerepo.berkkucukk.com.tr/packages
+   ```
+
+3. Sync and install:
+
+   ```bash
+   sudo pacman -Syu maze-ai
+   ```
+
+Optionally install `mazelinux-keyring` as well; it keeps the signing key up to date through pacman.
+
+Remove with `sudo pacman -Rns maze-ai`.
+
+### Build from source
+
+The package is built from this working tree by `build-package.sh` and installed with pacman:
 
 ```bash
-git clone https://aur.archlinux.org/maze-ai.git
-cd maze-ai
-makepkg -si
+sudo pacman -S --needed base-devel git
+git clone https://github.com/berk-kucuk/Maze-AI.git
+cd Maze-AI
+sudo pacman -S --needed $(bash -c 'source PKGBUILD; echo "${depends[@]}" "${makedepends[@]}"')
+./build-package.sh
+sudo pacman -U dist-pkg/maze-ai-*.pkg.tar.zst
 ```
 
-### From source
+Maze AI needs **Ollama** running on `localhost:11434` (see Quick Start).
 
-Requires **Python 3.10+**, **Qt 6.6+** (installed via PySide6), and **Ollama** running on `localhost:11434`.
-
-```bash
-git clone https://github.com/yourusername/maze-ai.git
-cd maze-ai
-pip install .
-
-# Or for development:
-pip install -e ".[dev]"
-```
+For development, install it editable into a virtual environment instead: `pip install -e ".[dev]"`.
 
 ## Quick Start
 
@@ -74,12 +104,35 @@ maze-ai
 A window appears. Type your question and press **Enter**, or use **Quick Ask**:
 
 - Copy some text
-- Press the global hotkey (default: `Ctrl+Alt+M`)
+- Press the global hotkey (default: `Meta+M`, changeable in System Settings → Shortcuts)
 - A small window opens with the clipboard text
 - Pick an action or refine the question
 - See the answer stream in real-time
 
-Press **Escape** to close, **Ctrl+L** to clear chat history, **Ctrl+Q** to quit.
+Press **Ctrl+/** (or **F1**) at any time to see every keyboard shortcut.
+
+### Keyboard shortcuts
+
+| Chats | | Messages | |
+|---|---|---|---|
+| New chat | `Ctrl+N` | Send / new line | `Enter` / `Shift+Enter` |
+| Search chats | `Ctrl+F` | Stop generating | `Esc` |
+| Previous / next chat | `Alt+↑` / `Alt+↓` | Regenerate the last answer | `Ctrl+R` |
+| Rename chat | `F2` | Copy the last answer | `Ctrl+Shift+C` |
+| Export chat | `Ctrl+E` | Edit the last message | `↑` in an empty box |
+| Delete chat | `Ctrl+Shift+Backspace` | Attach an image | `Ctrl+O` |
+| Show / hide history | `Ctrl+B` | Focus the message box | `Ctrl+L` |
+
+| Window | | Quick Ask & approvals | |
+|---|---|---|---|
+| Settings | `Ctrl+,` | Quick Ask (anywhere) | `Meta+M` |
+| Reminders | `Ctrl+Shift+R` | Copy answer / continue in chat | `Ctrl+Shift+C` / `Ctrl+Shift+Enter` |
+| Keyboard shortcuts | `Ctrl+/`, `F1` | Clipboard actions | `Alt+1` … `Alt+4` |
+| Maximize / restore | `F11` | Approve a command | `Ctrl+Enter` |
+| Hide the window | `Ctrl+W` | Deny / always allow | `Esc` / `Alt+A` |
+| Quit | `Ctrl+Q` | | |
+
+A plain **Enter** never approves a command: the approval dialog appears on its own, often while you are typing, so approving takes **Ctrl+Enter** or a click — and only after the dialog has been on screen for a moment.
 
 ### 3. Settings
 
@@ -105,8 +158,11 @@ maze_ai/
 │   ├── backend.py      # Ollama HTTP API client
 │   └── tokenizer.py    # Token counting (for context window awareness)
 └── ui/
-    ├── theme.py        # Monochrome palette, global QSS stylesheet
-    ├── effects.py      # AuroraCard: animated glass-morphism background
+    ├── theme.py        # Design tokens (colours, radii, type) and the global QSS
+    ├── icons.py        # Vector line icons rendered from inline SVG
+    ├── richtext.py     # Safe rendering: plain-text labels, HTML-free Markdown, link checks
+    ├── dialogs.py      # Shared frameless dialogs, shortcuts sheet, toasts
+    ├── effects.py      # AuroraCard: glass background (animates only while focused)
     ├── quick_ask.py    # Clipboard mode, one-click actions, pill-shaped input field
     ├── chat_view.py    # Message bubbles, 60 FPS token reveal queue, auto-scroll
     ├── input_bar.py    # Main question input, auto-sizing
@@ -171,9 +227,9 @@ Settings are stored in `~/.config/maze-ai/` (XDG-compliant):
 ```
 ~/.config/maze-ai/
 ├── config.json         # Model, hotkey, language, animation speeds
-├── history.json        # Chat history (cleared on `Ctrl+L`)
-└── cache/              # LLM cache (if using prefix caching)
 ```
+
+Chats, reminders and undo backups live in `~/.local/share/maze-ai/`; pasted images in `~/.cache/maze-ai/pasted/`. All of it is created owner-only (directories 0700, files 0600), and files left world-readable by older versions are tightened on first start.
 
 ## Development
 
@@ -239,7 +295,7 @@ GPL-3.0 or later. See [LICENSE](LICENSE) for details.
 
 ## Author
 
-[Berk Küçük](https://github.com/yourusername) — built with a focus on Turkish users and offline-first AI workflows.
+[Berk Küçük](https://github.com/berk-kucuk) — built with a focus on Turkish users and offline-first AI workflows.
 
 ---
 

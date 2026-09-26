@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import time
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -37,7 +37,9 @@ from ..llm.ollama_backend import POPULAR_MODELS as OLLAMA_POPULAR
 from ..llm.ollama_backend import short_size
 from ..llm.openai_backend import KNOWN_MODELS as OPENAI_MODELS
 from ..llm.openai_backend import PRESETS as OPENAI_PRESETS
+from . import icons
 from .effects import AuroraCard
+from .richtext import harden_labels
 from .theme import LINE, STYLESHEET, TEXT, TEXT_DIM, TEXT_FAINT
 from .widgets import NoWheelComboBox, NoWheelSpinBox
 from .worker import BenchmarkWorker, OllamaPullWorker
@@ -83,8 +85,8 @@ class SettingsDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
-        self.resize(600, 680)
-        self.setMinimumSize(520, 520)
+        self.resize(660, 740)
+        self.setMinimumSize(560, 560)
         self.setStyleSheet(STYLESHEET)
         self._drag = None
         #: name -> capability/size details, filled by the model refresh.
@@ -97,7 +99,8 @@ class SettingsDialog(QDialog):
         root.addWidget(card)
 
         outer = QVBoxLayout(card)
-        outer.setContentsMargins(34, 30, 34, 30)
+        outer.setContentsMargins(card.margin + 24, card.margin + 20,
+                                 card.margin + 20, card.margin + 20)
         outer.setSpacing(14)
 
         # ── header ───────────────────────────────────────────────────────
@@ -113,9 +116,12 @@ class SettingsDialog(QDialog):
         header.addLayout(htext)
         header.addStretch(1)
         close = QToolButton()
-        close.setObjectName("winclose")
-        close.setText("✕")
-        close.setFixedSize(34, 34)
+        close.setObjectName("icon")
+        close.setIcon(icons.icon("close", TEXT_DIM, 16, hover=TEXT))
+        close.setIconSize(QSize(16, 16))
+        close.setAutoRaise(True)
+        close.setToolTip(tr("Close") + "  (Esc)")
+        close.setFixedSize(32, 32)
         close.setCursor(Qt.CursorShape.PointingHandCursor)
         close.clicked.connect(self.reject)
         header.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
@@ -367,6 +373,7 @@ class SettingsDialog(QDialog):
         save.setObjectName("primary")
         save.setMinimumWidth(96)
         save.clicked.connect(self._save)
+        save.setToolTip(QKeySequence("Ctrl+S").toString(QKeySequence.SequenceFormat.NativeText))
         footer.addWidget(save)
         outer.addLayout(footer)
 
@@ -392,6 +399,9 @@ class SettingsDialog(QDialog):
                 popup.setAutoFillBackground(True)
 
         self._load()
+        # Model names, server errors and paths land in these labels: plain text.
+        harden_labels(self)
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save)
 
     # ── file manager menus ───────────────────────────────────────────────
     def _install_menus(self) -> None:

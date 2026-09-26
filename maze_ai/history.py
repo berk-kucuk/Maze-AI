@@ -12,13 +12,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .private import private_dir, tighten, write_private
+
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "maze-ai"
 CHATS_DIR = DATA_DIR / "chats"
+
+#: What a conversation id may look like. Ids come from files on disk and from
+#: UI signals; anything else (``../x``) must never become a path.
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 @dataclass
@@ -85,13 +92,23 @@ class ChatStore:
     """File-backed store for conversations."""
 
     def __init__(self) -> None:
-        CHATS_DIR.mkdir(parents=True, exist_ok=True)
+        private_dir(CHATS_DIR.parent)
+        private_dir(CHATS_DIR)
+        # Chats saved by older versions were world-readable; fix them once.
+        for path in CHATS_DIR.glob("*.json"):
+            try:
+                if path.stat().st_mode & 0o077:
+                    tighten(path)
+            except OSError:
+                continue
         # path -> (mtime, size, Conversation). The sidebar re-lists after every
         # turn and on every search keystroke; without this, each refresh parsed
         # every chat file on disk again.
         self._cache: dict[str, tuple[float, int, Conversation]] = {}
 
     def _path(self, conv_id: str) -> Path:
+        if not _ID_RE.match(conv_id or ""):
+            raise ValueError(f"invalid conversation id: {conv_id!r}")
         return CHATS_DIR / f"{conv_id}.json"
 
     # ── queries ──────────────────────────────────────────────────────────
@@ -127,7 +144,7 @@ class ChatStore:
             return Conversation.from_dict(
                 json.loads(self._path(conv_id).read_text("utf-8"))
             )
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, ValueError):
             return None
 
     # ── mutations ────────────────────────────────────────────────────────
@@ -142,17 +159,20 @@ class ChatStore:
         if conv.is_empty:
             return
         conv.ensure_title()
-        self._cache.pop(str(self._path(conv.id)), None)
-        CHATS_DIR.mkdir(parents=True, exist_ok=True)
+        if not _ID_RE.match(conv.id or ""):
+            conv.id = uuid.uuid4().hex
         path = self._path(conv.id)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(conv.to_dict(), ensure_ascii=False, indent=2), "utf-8")
-        os.replace(tmp, path)
+        self._cache.pop(str(path), None)
+        write_private(path, json.dumps(conv.to_dict(), ensure_ascii=False, indent=2))
 
     def delete(self, conv_id: str) -> None:
-        self._cache.pop(str(self._path(conv_id)), None)
         try:
-            self._path(conv_id).unlink()
+            path = self._path(conv_id)
+        except ValueError:
+            return
+        self._cache.pop(str(path), None)
+        try:
+            path.unlink()
         except FileNotFoundError:
             pass
 
