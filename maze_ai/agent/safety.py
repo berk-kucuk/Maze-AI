@@ -71,7 +71,8 @@ _READONLY_CMDS = {
 # blanket ban would be both wrong and annoying. Every entry was checked against
 # that program's own manual.
 _UNSAFE_FLAGS: dict[str, set[str]] = {
-    "sort":      {"-o", "--output"},        # writes its result to a file
+    "sort":      {"-o", "--output",         # writes its result to a file
+                  "--compress-program"},    # RUNS the named program on temp files
     "tree":      {"-o"},                    # same
     "date":      {"-s", "--set"},           # sets the system clock
     "hostname":  {"-b", "--boot", "-F", "--file"},
@@ -80,6 +81,23 @@ _UNSAFE_FLAGS: dict[str, set[str]] = {
     # attacker-chosen file is straightforward code execution.
     "neofetch":  {"--config"},
     "fastfetch": {"-c", "--config"},
+    # Search tools that RUN a helper program of the caller's choosing.
+    "rg":        {"--pre"},                 # preprocessor, executed per file
+    "ag":        {"--pager"},               # output piped through a program
+    # git: --ext-diff runs the external diff program from config; --output
+    # writes a file; --textconv (explicit) runs conversion drivers. None of
+    # them is needed for reading.
+    "git":       {"--ext-diff", "--output", "--textconv"},
+}
+
+# git subcommands that LIST by default but CHANGE the repository once given an
+# argument (`git branch -D x`, `git tag -d v1`, `git remote add …`). They count
+# as read-only only with nothing after them but these listing flags.
+_GIT_LIST_ONLY: dict[str, set[str]] = {
+    "branch": {"-a", "-r", "-v", "-vv", "--all", "--remotes", "--verbose",
+               "--list", "--show-current"},
+    "tag":    {"-l", "--list"},
+    "remote": {"-v", "--verbose"},
 }
 
 
@@ -186,6 +204,13 @@ def is_readonly_command(command: str) -> bool:
                 return False
             subcmd = next((t for t in rest if not t.startswith("-")), "")
             if subcmd in allowed:
+                if _has_unsafe_flag(base, rest):
+                    return False
+                listing = _GIT_LIST_ONLY.get(subcmd) if base == "git" else None
+                if listing is not None:
+                    after = rest[rest.index(subcmd) + 1:]
+                    if any(t not in listing for t in after):
+                        return False
                 continue
         return False
     return True

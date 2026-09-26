@@ -101,6 +101,21 @@ def test_reading_a_secret_is_never_auto_approved():
     "fastfetch -c /tmp/evil.sh",
     # pacman's operation is a flag, so an unlisted flag must not ride along.
     "pacman -Q --print-format %n -S evil",
+    # Search/sort flags whose argument is a PROGRAM to execute.
+    "rg --pre=/tmp/evil foo .",
+    "rg --pre /tmp/evil foo",
+    "sort --compress-program=/tmp/evil -S 1 file.txt",
+    "ag --pager=/tmp/evil foo",
+    # git flags that run an external diff/conversion program or write a file.
+    "git diff --ext-diff",
+    "git log -p --textconv",
+    "git diff --output=/home/u/.bashrc",
+    # Listing subcommands that CHANGE the repository once given an argument.
+    "git branch -D main",
+    "git branch -m old new",
+    "git tag -d v1.0",
+    "git remote add evil https://evil.tld/repo.git",
+    "git remote set-url origin https://evil.tld/repo.git",
 ])
 def test_readonly_classifier_rejects_smuggled_commands(command):
     assert not is_readonly_command(command)
@@ -120,6 +135,9 @@ def test_readonly_classifier_rejects_smuggled_commands(command):
     "tree -L 2",
     # A multi-line command is fine when EVERY line is read-only.
     "ls\npwd",
+    # Plain searches and listings stay prompt-free.
+    "rg foo .", "ag foo", "git branch", "git branch -a", "git tag -l",
+    "git remote -v", "git show HEAD",
 ])
 def test_readonly_classifier_still_accepts_ordinary_inspects(command):
     assert is_readonly_command(command)
