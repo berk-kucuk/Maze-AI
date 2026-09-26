@@ -1,6 +1,6 @@
 # Maintainer: Berk Küçük <dev.berkkucukk@gmail.com>
 pkgname=maze-ai
-pkgver=1.18.0
+pkgver=1.19.0
 pkgrel=1
 pkgdesc="Agentic AI assistant for Maze Linux — local models via Ollama, native tool calling, monochrome UI"
 arch=('any')

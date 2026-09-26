@@ -244,8 +244,11 @@ def test_the_empty_bar_has_no_dead_space(app, config):
 def test_the_input_and_the_button_share_one_line(app, config):
     window = QuickAsk(config)
     window.show()
-    assert window.composer.height() == window.send_btn.height(), \
-        "the field and the button must be the same height, or nothing lines up"
+    QApplication.processEvents()
+    centre = window.composer.geometry().center().y()
+    for widget in (window.send_btn, window.mark):
+        assert abs(widget.geometry().center().y() - centre) <= 1, \
+            "the mark, the field and the button must sit on one line"
 
 
 def test_the_input_centres_its_text(app, config):
@@ -283,14 +286,39 @@ def test_clipboard_mode_opens_the_body(app, config):
 
 
 # ── rounding: nothing square inside a rounded window ───────────────────────
-def test_the_field_is_a_pill(app, config):
+def test_the_ask_row_is_flush_with_the_bar(app, config):
+    # The field is the bar itself (command-palette style): no box inside it.
     from maze_ai.ui.quick_ask import _ROW_HEIGHT
 
     window = QuickAsk(config)
-    radius = int(window.ask_row.styleSheet().split("border-radius:")[1].split("px")[0])
-    assert radius * 2 == _ROW_HEIGHT, \
-        "the radius has to be half the row height, or the ends are not round"
-    assert window.ask_row.minimumHeight() in (0, _ROW_HEIGHT)
+    assert "border: none" in window.ask_row.styleSheet()
+    assert window.ask_row.height() == _ROW_HEIGHT or window.ask_row.minimumHeight() == _ROW_HEIGHT
+
+
+def test_the_button_turns_into_stop_while_busy(app, config):
+    window = QuickAsk(config)
+    idle = window.send_btn.toolTip()
+    window._set_send_mode(busy=True)
+    assert window.send_btn.toolTip() != idle
+    window._set_send_mode(busy=False)
+    assert window.send_btn.toolTip() == idle
+
+
+def test_up_brings_back_the_last_question(app, config):
+    window = QuickAsk(config)
+    window._last_question = "what is a symlink"
+    window._recall()
+    assert window.composer.toPlainText() == "what is a symlink"
+
+
+def test_footer_hints_follow_the_state(app, config):
+    window = QuickAsk(config)
+    window.show()
+    assert window.ask_hint.isVisible() and not window.copy_btn.isVisible()
+    window._answer = "done"
+    window._on_done("done")
+    assert window.copy_btn.isVisible() and window.chat_btn.isVisible()
+    assert not window.ask_hint.isVisible()
 
 
 def test_the_input_paints_nothing_of_its_own(app, config):

@@ -524,6 +524,13 @@ TURKISH: dict[str, str] = {
     "Open link": "Bağlantıyı aç",
     "Blocked a link that isn't a web address.":
         "Web adresi olmayan bir bağlantı engellendi.",
+    # ── 1.19: Quick Ask ───────────────────────────────────────────────────
+    "Clipboard · {count} characters": "Pano · {count} karakter",
+    "Folder": "Klasör",
+    "{count} file(s)": "{count} dosya",
+    "Screen capture": "Ekran görüntüsü",
+    "Writing…": "Yazıyor…",
+    "No answer.": "Yanıt yok.",
 }
 
 _CATALOGS: dict[str, dict[str, str]] = {"tr": TURKISH}
