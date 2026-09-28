@@ -42,34 +42,19 @@ log = logging.getLogger(__name__)
 
 DEFAULT_HOST = "http://localhost:11434"
 
-# Curated list of popular models from the Ollama library, shown in the
-# "download a model" picker. Names are valid `ollama pull` tags.
-POPULAR_MODELS: list[tuple[str, str]] = [
-    ("qwen2.5", "Qwen 2.5 · 7B · tool calling, strong agent"),
-    ("qwen2.5-coder", "Qwen 2.5 Coder · 7B · coding focused"),
-    ("llama3.2", "Meta Llama 3.2 · 3B · fast, tool calling"),
-    ("llama3.1", "Meta Llama 3.1 · 8B · tool calling, general"),
-    ("mistral-nemo", "Mistral Nemo · 12B · tools, larger context"),
-    ("mistral", "Mistral · 7B · fast and capable"),
-    ("gemma3", "Google Gemma 3 · 4B · vision, small"),
-    ("gemma2", "Google Gemma 2 · 9B · balanced"),
-    ("phi4", "Microsoft Phi-4 · 14B · reasoning"),
-    ("deepseek-r1", "DeepSeek R1 · 7B · reasoning model"),
-    ("granite3.3", "IBM Granite 3.3 · 8B · tools"),
-    ("llava", "LLaVA · 7B · vision + text"),
-]
+# The download picker searches the live library: see ``library.py``.
 
 # Fallback only: modern Ollama reports capabilities per model, so these name
 # markers are just for servers too old to answer /api/show.
 _VISION_MARKERS = (
-    "llava", "bakllava", "vision", "moondream", "minicpm-v", "gemma3",
+    "llava", "bakllava", "vision", "moondream", "minicpm-v", "gemma3", "gemma4",
     "qwen2-vl", "qwen2.5vl", "qwen2.5-vl", "qwen3-vl", "pixtral",
     "cogvlm", "internvl", "granite3.2-vision", "mistral-small3", "llama4",
 )
 _TOOL_MARKERS = (
     "llama3.1", "llama3.2", "llama3.3", "qwen2.5", "qwen3", "mistral",
     "mistral-nemo", "command-r", "firefunction", "granite3", "hermes3",
-    "phi4", "smollm2", "athene",
+    "phi4", "smollm2", "athene", "gpt-oss", "granite4", "gemma4", "glm", "deepseek-v",
 )
 
 # Context sizes we are willing to ask for by default. A model may advertise

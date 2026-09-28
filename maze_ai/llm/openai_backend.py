@@ -28,11 +28,14 @@ PRESETS: list[tuple[str, str]] = [
 
 # Sensible fallbacks for the model picker before the API is queried.
 KNOWN_MODELS = [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o4-mini",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
     "gpt-4.1",
     "gpt-4.1-mini",
+    "gpt-4o-mini",
 ]
 
 

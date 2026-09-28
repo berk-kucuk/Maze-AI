@@ -129,3 +129,32 @@ class AgentWorker(QThread):
             self.event.emit(AgentEvent("error", text=str(exc), ok=False))
             answer = ""
         self.done.emit(answer)
+
+
+class CallWorker(QThread):
+    """Runs one blocking call (usually HTTP) off the UI thread.
+
+    The settings dialog used to query Ollama, Gemini and the model library
+    inline, so a slow or dead server froze the whole window until the socket
+    timed out. ``token`` lets the caller drop answers that arrive after a newer
+    request was already made.
+    """
+
+    done = Signal(object, object)      # token, result
+    failed = Signal(object, str)       # token, error message
+
+    def __init__(self, fn, *args, token: object = None, **kwargs) -> None:
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.token = token
+
+    def run(self) -> None:
+        try:
+            result = self.fn(*self.args, **self.kwargs)
+        except Exception as exc:  # noqa: BLE001 - reported to the UI instead
+            log.debug("background call failed: %s", exc)
+            self.failed.emit(self.token, str(exc))
+            return
+        self.done.emit(self.token, result)

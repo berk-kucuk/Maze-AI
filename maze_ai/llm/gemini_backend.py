@@ -16,13 +16,11 @@ API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 # A sensible, curated default list of current, valid model ids. The picker
 # also merges whatever the API advertises at runtime (authoritative).
 KNOWN_MODELS = [
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
 ]
 
 
@@ -149,8 +147,9 @@ class GeminiBackend(LLMBackend):
                 methods = m.get("supportedGenerationMethods", [])
                 if mid and "generateContent" in methods:
                     names.append(mid)
-            merged = sorted(set(names) | set(KNOWN_MODELS))
-            return merged or list(KNOWN_MODELS)
+            # The API's own list is authoritative: merging in the fallback
+            # would resurrect retired models. Newest generation first.
+            return sorted(set(names), reverse=True) or list(KNOWN_MODELS)
         except requests.RequestException:
             return list(KNOWN_MODELS)
 

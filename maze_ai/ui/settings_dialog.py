@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -32,8 +34,8 @@ from ..config import LANGUAGES, MODE_ASK, MODE_AUTO, MODE_CHAT, Config
 from ..i18n import UI_LANGUAGES, tr
 from ..llm import GeminiBackend, OllamaBackend, OpenAIBackend
 from ..llm.gemini_backend import KNOWN_MODELS as GEMINI_MODELS
-from ..llm.hardware import GB, describe_hardware
-from ..llm.ollama_backend import POPULAR_MODELS as OLLAMA_POPULAR
+from ..llm import library
+from ..llm.hardware import GB, describe_hardware, estimate_fit
 from ..llm.ollama_backend import short_size
 from ..llm.openai_backend import KNOWN_MODELS as OPENAI_MODELS
 from ..llm.openai_backend import PRESETS as OPENAI_PRESETS
@@ -42,7 +44,7 @@ from .effects import AuroraCard
 from .richtext import harden_labels
 from .theme import LINE, STYLESHEET, TEXT, TEXT_DIM, TEXT_FAINT
 from .widgets import NoWheelComboBox, NoWheelSpinBox
-from .worker import BenchmarkWorker, OllamaPullWorker
+from .worker import BenchmarkWorker, CallWorker, OllamaPullWorker
 
 
 def _label(text: str) -> QLabel:
@@ -52,6 +54,16 @@ def _label(text: str) -> QLabel:
         "letter-spacing: 0.4px; background: transparent;"
     )
     return lbl
+
+
+#: Worker threads still running, possibly beyond the dialog's lifetime.
+_LIVE_WORKERS: set[CallWorker] = set()
+
+
+def _show(label: QLabel, text: str) -> None:
+    """Set a status line's text and hide it while empty, so it leaves no gap."""
+    label.setText(text)
+    label.setVisible(bool(text))
 
 
 def _section(title: str, subtitle: str = "") -> tuple[QFrame, QVBoxLayout]:
@@ -92,6 +104,10 @@ class SettingsDialog(QDialog):
         #: name -> capability/size details, filled by the model refresh.
         self._model_details: dict[str, dict] = {}
         self._confirm_delete = ""
+        #: Background calls in flight (kept alive until their thread ends).
+        self._workers: set[CallWorker] = set()
+        self._lib_vram = 0
+        self._lib_tags: dict[str, library.LibraryTag] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -179,7 +195,7 @@ class SettingsDialog(QDialog):
         lay.addWidget(_label("RESPONSE LANGUAGE"))
         self.lang_box = NoWheelComboBox()
         for code, label in LANGUAGES:
-            self.lang_box.addItem(label, code)
+            self.lang_box.addItem(tr(label), code)
         lay.addWidget(self.lang_box)
 
         lay.addSpacing(4)
@@ -284,10 +300,10 @@ class SettingsDialog(QDialog):
         lay.addSpacing(4)
         lay.addWidget(_label("CUSTOM INSTRUCTIONS"))
         self.custom_instructions = QPlainTextEdit()
-        self.custom_instructions.setPlaceholderText(
+        self.custom_instructions.setPlaceholderText(tr(
             "Standing instructions for every chat — e.g. “Always use the fish shell”, "
             "“Prefer concise answers”, project context…"
-        )
+        ))
         self.custom_instructions.setFixedHeight(90)
         lay.addWidget(self.custom_instructions)
         form.addWidget(sec_adv)
@@ -397,11 +413,24 @@ class SettingsDialog(QDialog):
             if popup is not None:
                 popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
                 popup.setAutoFillBackground(True)
+        # The library filters are short words; the search box gets the width.
+        for cb in (self.lib_order, self.lib_filter):
+            cb.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            cb.setMinimumContentsLength(11)
 
         self._load()
         # Model names, server errors and paths land in these labels: plain text.
         harden_labels(self)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save)
+        # Network lookups start once the window is up, never before it.
+        QTimer.singleShot(0, self._start_background_loads)
+
+    def _start_background_loads(self) -> None:
+        self._refresh_ollama_models()
+        self._search_library()
+        backend = self._ollama_backend()
+        self._run(lambda: backend.usable_vram()[0],
+                  on_done=lambda _t, vram: setattr(self, "_lib_vram", int(vram or 0)))
 
     # ── file manager menus ───────────────────────────────────────────────
     def _install_menus(self) -> None:
@@ -497,6 +526,7 @@ class SettingsDialog(QDialog):
         self.model_caps = QLabel("")
         self.model_caps.setWordWrap(True)
         self.model_caps.setObjectName("faint")
+        self.model_caps.hide()
         lay.addWidget(self.model_caps)
 
         # Where it will run. On a local box this is the single most useful
@@ -509,6 +539,7 @@ class SettingsDialog(QDialog):
         self.fit_line = QLabel("")
         self.fit_line.setWordWrap(True)
         self.fit_line.setStyleSheet(f"color: {TEXT_DIM}; font-size: 9pt;")
+        self.fit_line.hide()
         lay.addWidget(self.fit_line)
 
         runtime_row = QHBoxLayout()
@@ -579,18 +610,24 @@ class SettingsDialog(QDialog):
         lay.addSpacing(4)
         lay.addWidget(sep)
         lay.addWidget(_label("DOWNLOAD A MODEL"))
+        lay.addWidget(self._library_browser())
+        lay.addWidget(_label("VERSION TO DOWNLOAD"))
         drow = QHBoxLayout()
         self.pull_box = NoWheelComboBox()
         self.pull_box.setEditable(True)
-        for tag, desc in OLLAMA_POPULAR:
-            self.pull_box.addItem(f"{tag}   —   {desc}", tag)
-        self.pull_box.setCurrentIndex(0)
+        self.pull_box.lineEdit().setPlaceholderText(tr("Pick a model above, or type a tag"))
+        self.pull_box.currentIndexChanged.connect(self._describe_pull_tag)
         drow.addWidget(self.pull_box, 1)
         self.pull_btn = QPushButton(tr("Download"))
         self.pull_btn.setFixedWidth(110)
         self.pull_btn.clicked.connect(self._start_pull)
         drow.addWidget(self.pull_btn)
         lay.addLayout(drow)
+        self.tag_hint = QLabel("")
+        self.tag_hint.setWordWrap(True)
+        self.tag_hint.setObjectName("faint")
+        self.tag_hint.hide()
+        lay.addWidget(self.tag_hint)
 
         self.pull_bar = QProgressBar()
         self.pull_bar.setTextVisible(True)
@@ -598,13 +635,81 @@ class SettingsDialog(QDialog):
         self.pull_bar.hide()
         lay.addWidget(self.pull_bar)
         self.pull_status = QLabel("")
+        self.pull_status.setWordWrap(True)
         self.pull_status.setObjectName("faint")
         lay.addWidget(self.pull_status)
-
-        browse = QLabel(tr("Browse more at ollama.com/library"))
-        browse.setObjectName("faint")
-        lay.addWidget(browse)
         return pane
+
+    def _library_browser(self) -> QWidget:
+        """Search box, filters and live results from the ollama.com library."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.lib_query = QLineEdit()
+        self.lib_query.setPlaceholderText(tr("Search ollama.com — qwen, gemma, coder…"))
+        self.lib_query.setClearButtonEnabled(True)
+        self.lib_query.textChanged.connect(lambda _t: self._lib_timer.start())
+        self.lib_query.returnPressed.connect(self._search_library)
+        row.addWidget(self.lib_query, 1)
+        self.lib_order = NoWheelComboBox()
+        self.lib_order.addItem(tr("Popular"), library.ORDER_POPULAR)
+        self.lib_order.addItem(tr("Newest"), library.ORDER_NEWEST)
+        self.lib_order.currentIndexChanged.connect(self._search_library)
+        row.addWidget(self.lib_order)
+        self.lib_filter = NoWheelComboBox()
+        for label, cap in (("All", ""), ("Tool calling", "tools"), ("Vision", "vision"),
+                           ("Thinking", "thinking"), ("Embedding", "embedding")):
+            self.lib_filter.addItem(tr(label), cap)
+        self.lib_filter.currentIndexChanged.connect(self._search_library)
+        row.addWidget(self.lib_filter)
+        lay.addLayout(row)
+
+        self.lib_local_only = QCheckBox(tr("Hide cloud-only models"))
+        self.lib_local_only.setChecked(True)
+        self.lib_local_only.toggled.connect(self._render_library)
+        lay.addWidget(self.lib_local_only)
+
+        self.lib_list = QListWidget()
+        self.lib_list.setFixedHeight(260)
+        self.lib_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.lib_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lib_list.setStyleSheet(
+            f"QListWidget {{ background: rgba(255,255,255,0.02); border: 1px solid {LINE};"
+            " border-radius: 10px; padding: 4px; outline: none; }"
+            "QListWidget::item { border-radius: 8px; margin: 1px 0; }"
+            "QListWidget::item:hover { background: rgba(255,255,255,0.04); }"
+            "QListWidget::item:selected { background: rgba(255,255,255,0.09); }"
+        )
+        self.lib_list.currentRowChanged.connect(self._on_library_pick)
+        lay.addWidget(self.lib_list)
+
+        foot = QHBoxLayout()
+        foot.setSpacing(8)
+        self.lib_status = QLabel("")
+        self.lib_status.setObjectName("faint")
+        self.lib_status.setWordWrap(True)
+        foot.addWidget(self.lib_status, 1)
+        self.lib_more = QPushButton(tr("Load more"))
+        self.lib_more.clicked.connect(self._library_next_page)
+        self.lib_more.hide()
+        foot.addWidget(self.lib_more)
+        lay.addLayout(foot)
+
+        #: Results so far (all pages), the page last fetched, and a counter
+        #: that lets late answers from superseded searches be ignored.
+        self._lib_results: list[library.LibraryModel] = []
+        self._lib_page = 1
+        self._lib_token = 0
+        self._tags_token = 0
+        self._lib_timer = QTimer(self)
+        self._lib_timer.setSingleShot(True)
+        self._lib_timer.setInterval(350)
+        self._lib_timer.timeout.connect(self._search_library)
+        return box
 
     def _gemini_pane(self) -> QWidget:
         pane = QWidget()
@@ -695,10 +800,13 @@ class SettingsDialog(QDialog):
         return pane
 
     def _current_openai_base(self) -> str:
-        data = self.openai_base.currentData()
-        if data:
-            return str(data)
-        return self.openai_base.currentText().split("—")[0].strip()
+        # currentData() belongs to the selected *item*; once the user types
+        # (or _load sets a custom URL) the text no longer matches it.
+        text = self.openai_base.currentText().strip()
+        index = self.openai_base.currentIndex()
+        if index >= 0 and text == self.openai_base.itemText(index):
+            return str(self.openai_base.itemData(index))
+        return text.split("—")[0].strip()
 
     def _refresh_openai_models(self) -> None:
         self.status.setText(tr("Querying the API…"))
@@ -706,13 +814,16 @@ class SettingsDialog(QDialog):
             api_key=self.openai_key.text().strip(),
             base_url=self._current_openai_base(),
         )
-        models = backend.available_models()
-        current = self.openai_model.currentText()
-        self.openai_model.clear()
-        self.openai_model.addItems(models)
+        self._run(backend.available_models, token=self.openai_model,
+                  on_done=self._fill_model_box)
+
+    def _fill_model_box(self, box, models) -> None:
+        current = box.currentText()
+        box.clear()
+        box.addItems(models)
         if current:
-            self.openai_model.setCurrentText(current)
-        self.status.setText(f"Found {len(models)} model(s).")
+            box.setCurrentText(current)
+        self.status.setText(tr("Found {count} model(s).").format(count=len(models)))
 
     # ── logic ────────────────────────────────────────────────────────────
     def _on_backend_changed(self, index: int) -> None:
@@ -733,7 +844,7 @@ class SettingsDialog(QDialog):
         """Show what the selected model supports, and how it will be driven."""
         name = self.ollama_model.currentText().strip()
         if not name:
-            self.model_caps.setText("")
+            _show(self.model_caps, "")
             return
         info = dict(self._model_details.get(name) or {})
         # /api/tags under-reports capabilities on some servers, so ask
@@ -742,7 +853,7 @@ class SettingsDialog(QDialog):
         if detail:
             info.update({k: v for k, v in detail.items() if v})
         if not info:
-            self.model_caps.setText("")
+            _show(self.model_caps, "")
             return
         caps = info.get("capabilities") or []
         bits = []
@@ -763,14 +874,14 @@ class SettingsDialog(QDialog):
             bits.append(tr("vision"))
         if "thinking" in caps:
             bits.append(tr("thinking"))
-        self.model_caps.setText("  ·  ".join(bits))
+        _show(self.model_caps, "  ·  ".join(bits))
         self._refresh_placement()
 
     def _refresh_placement(self) -> None:
         """Fill in the fit prediction and the live placement for this model."""
         name = self.ollama_model.currentText().strip()
         if not name:
-            self.fit_line.setText("")
+            _show(self.fit_line, "")
             self.runtime_line.setText("")
             return
         backend = self._ollama_backend(name)
@@ -801,7 +912,7 @@ class SettingsDialog(QDialog):
             best = backend.best_context(name)
             if best and best != context:
                 line += "  " + tr("Suggested context: {tokens}").format(tokens=best)
-        self.fit_line.setText(line.strip())
+        _show(self.fit_line, line.strip())
 
         runtime = backend.runtime(name)
         if runtime.loaded:
@@ -896,20 +1007,41 @@ class SettingsDialog(QDialog):
         self.ollama_ctx.setEnabled(not checked)
         self._refresh_placement()
 
-    def _refresh_ollama_models(self) -> None:
+    def _refresh_ollama_models(self, *_args, select: str = "") -> None:
         self.status.setText(tr("Querying Ollama…"))
         backend = OllamaBackend(self.ollama_host.text().strip() or None)
-        details = backend.installed_models()
+
+        def query() -> tuple[list[dict], list[str]]:
+            return backend.installed_models(), backend.loaded_models()
+
+        self._run(query, token=select, on_done=self._on_ollama_models,
+                  on_fail=lambda _t, e: self.status.setText(f"✕ {e}"))
+
+    def _on_ollama_models(self, select, result) -> None:
+        details, loaded = result
         self._model_details = {d["name"]: d for d in details}
-        loaded = set(backend.loaded_models())
         models = [d["name"] for d in details]
-        current = self.ollama_model.currentText()
+        current = select or self.ollama_model.currentText().strip()
+        self.ollama_model.blockSignals(True)
         self.ollama_model.clear()
-        self.ollama_model.addItems(models)
+        for d in details:
+            size = short_size(int(d.get("size") or 0)) if d.get("size") else ""
+            self.ollama_model.addItem(d["name"])
+            if size:
+                self.ollama_model.setItemData(
+                    self.ollama_model.count() - 1, size, Qt.ItemDataRole.ToolTipRole
+                )
         if current:
             self.ollama_model.setCurrentText(current)
+        self.ollama_model.blockSignals(False)
         self._describe_ollama_model()
-        self._refresh_placement()
+        self._render_library()
+        if models and current and current not in models and f"{current}:latest" not in models:
+            self.status.setText(
+                tr("'{model}' is not installed — pick one of yours or download it below.")
+                .format(model=current)
+            )
+            return
         if loaded:
             self.status.setText(
                 tr("In memory now: {models}").format(models=", ".join(sorted(loaded)))
@@ -920,13 +1052,264 @@ class SettingsDialog(QDialog):
             else tr("No models found — is Ollama running?")
         )
 
+    # ── background calls ─────────────────────────────────────────────────
+    def _run(self, fn, *args, token=None, on_done=None, on_fail=None, **kwargs) -> None:
+        """Run ``fn`` on a worker thread and deliver the result to the UI."""
+        worker = CallWorker(fn, *args, token=token, **kwargs)
+        if on_done is not None:
+            worker.done.connect(on_done)
+        if on_fail is not None:
+            worker.failed.connect(on_fail)
+        # Keep a reference until the thread ends, or Qt destroys it mid-run —
+        # module-level, so closing the dialog mid-search cannot do that either.
+        self._workers.add(worker)
+        _LIVE_WORKERS.add(worker)
+        worker.finished.connect(lambda w=worker: (self._workers.discard(w),
+                                                  _LIVE_WORKERS.discard(w)))
+        worker.start()
+
+    def done(self, result: int) -> None:  # noqa: D401 - Qt override
+        # Answers that arrive after the dialog is gone have nowhere to go.
+        for worker in list(self._workers):
+            for signal in (worker.done, worker.failed):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+        self._lib_timer.stop()
+        super().done(result)
+
+    # ── model library ────────────────────────────────────────────────────
+    def _search_library(self, *_args, page: int = 1) -> None:
+        self._lib_timer.stop()
+        self._lib_token += 1
+        self._lib_page = page
+        if page == 1:
+            self.lib_more.hide()
+        self.lib_status.setText(tr("Searching ollama.com…"))
+        self._run(
+            library.search, self.lib_query.text(),
+            order=self.lib_order.currentData(),
+            capability=self.lib_filter.currentData(),
+            page=page,
+            token=(self._lib_token, page),
+            on_done=self._on_library_results,
+            on_fail=self._on_library_failed,
+        )
+
+    def _library_next_page(self) -> None:
+        self._search_library(page=self._lib_page + 1)
+
+    def _on_library_results(self, token, results) -> None:
+        serial, page = token
+        if serial != self._lib_token:
+            return   # a newer search has been started since
+        if page == 1:
+            self._lib_results = list(results)
+        else:
+            known = {m.name for m in self._lib_results}
+            self._lib_results += [m for m in results if m.name not in known]
+        # ollama.com answers 20 per page; fewer means this was the last one.
+        self.lib_more.setVisible(len(results) >= 20)
+        self._render_library(source=tr("ollama.com"))
+
+    def _on_library_failed(self, token, error: str) -> None:
+        serial, page = token
+        if serial != self._lib_token:
+            return
+        if page > 1:
+            self.lib_status.setText(tr("Could not load more: {error}").format(error=error))
+            return
+        self._lib_results = library.fallback(
+            self.lib_query.text(), self.lib_filter.currentData()
+        )
+        self.lib_more.hide()
+        self._render_library(source=tr("offline list — ollama.com is unreachable"))
+
+    def _render_library(self, *_args, source: str = "") -> None:
+        if source:
+            self._lib_source = source
+        hide_cloud = self.lib_local_only.isChecked()
+        installed = {n.split(":")[0] for n in self._model_details}
+        shown = [m for m in self._lib_results if not (hide_cloud and m.cloud_only)]
+        self.lib_list.blockSignals(True)
+        self.lib_list.clear()
+        for model in shown:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, model.name)
+            widget = self._library_row(model, model.name in installed)
+            item.setSizeHint(widget.sizeHint())
+            self.lib_list.addItem(item)
+            self.lib_list.setItemWidget(item, widget)
+        self.lib_list.blockSignals(False)
+        hidden = len(self._lib_results) - len(shown)
+        text = tr("{count} models · {source}").format(
+            count=len(shown), source=getattr(self, "_lib_source", "")
+        )
+        if hidden:
+            text += "  ·  " + tr("{count} cloud-only hidden").format(count=hidden)
+        if not shown:
+            text = tr("No models match.") + "  " + text
+        self.lib_status.setText(text)
+
+    def _library_row(self, model: library.LibraryModel, installed: bool) -> QWidget:
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(row)
+        lay.setContentsMargins(10, 7, 10, 7)
+        lay.setSpacing(2)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        name = QLabel(model.name)
+        name.setStyleSheet(f"color: {TEXT}; font-weight: 700; font-size: 10pt;")
+        head.addWidget(name)
+        chips = [c for c in model.capabilities if c != "cloud"]
+        meta = []
+        if model.sizes:
+            meta.append(" ".join(model.sizes[:6]) + (" …" if len(model.sizes) > 6 else ""))
+        if model.cloud_only:
+            meta.append(tr("cloud only"))
+        if chips:
+            meta.append(" · ".join(tr(c) for c in chips))
+        info = QLabel("   ".join(meta))
+        info.setStyleSheet(f"color: {TEXT_DIM}; font-size: 8.5pt;")
+        head.addWidget(info, 1)
+        right = []
+        if installed:
+            right.append(tr("✓ installed"))
+        if model.pulls:
+            right.append(tr("{count} pulls").format(count=model.pulls))
+        stats = QLabel("  ·  ".join(right))
+        stats.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 8.5pt;")
+        head.addWidget(stats)
+        lay.addLayout(head)
+        if model.description:
+            desc = QLabel(model.description)
+            desc.setWordWrap(True)
+            desc.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 8.5pt;")
+            lay.addWidget(desc)
+        # These labels carry text from a web page: never let Qt parse it as HTML.
+        for label in row.findChildren(QLabel):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+        return row
+
+    def _on_library_pick(self, row: int) -> None:
+        item = self.lib_list.item(row)
+        if item is None:
+            return
+        name = str(item.data(Qt.ItemDataRole.UserRole))
+        model = next((m for m in self._lib_results if m.name == name), None)
+        # Offer the parameter sizes straight away; the exact tags (with their
+        # download sizes) replace them once ollama.com answers.
+        self.pull_box.blockSignals(True)
+        self.pull_box.clear()
+        self.pull_box.addItem(tr("{model} · default version").format(model=name), name)
+        for size in (model.sizes if model else []):
+            self.pull_box.addItem(f"{name}:{size}", f"{name}:{size}")
+        self.pull_box.setCurrentIndex(0)
+        self.pull_box.blockSignals(False)
+        self._describe_pull_tag()
+        self.tag_hint.setText(tr("Reading the versions of '{model}'…").format(model=name))
+        self.tag_hint.show()
+        self._tags_token += 1
+        self._run(library.tags, name, token=(self._tags_token, name),
+                  on_done=self._on_tags, on_fail=self._on_tags_failed)
+
+    def _usable_vram(self) -> int:
+        try:
+            return self._ollama_backend().usable_vram()[0]
+        except Exception:  # noqa: BLE001 - a hint, never a failure
+            return 0
+
+    def _tag_verdict(self, size: int) -> str:
+        usable = getattr(self, "_lib_vram", 0)
+        if not size or not usable:
+            return ""
+        report = estimate_fit(size, 8192, total_bytes=usable, free_bytes=usable)
+        return {
+            "gpu": tr("fits the GPU"),
+            "tight": tr("just fits the GPU"),
+            "spill": tr("partly on CPU"),
+            "cpu": tr("too big for the GPU"),
+        }.get(report.verdict, "")
+
+    def _on_tags(self, token, tags) -> None:
+        serial, name = token
+        if serial != self._tags_token:
+            return
+        local = [t for t in tags if not t.cloud]
+        if not local:
+            self.tag_hint.setText(
+                tr("'{model}' only runs on Ollama's cloud — nothing to download.")
+                .format(model=name) if tags else
+                tr("No version list available — the default version will be downloaded.")
+            )
+            return
+        self._lib_tags = {t.tag: t for t in local}
+        # Simple tags first ("27b", "latest"); quantisation variants after.
+        plain = [t for t in local if "-" not in t.tag.split(":", 1)[1]]
+        variants = [t for t in local if t not in plain]
+        best = None
+        self.pull_box.blockSignals(True)
+        self.pull_box.clear()
+        for group in (plain, variants):
+            for t in group:
+                bits = [t.tag]
+                if t.size_label:
+                    bits.append(t.size_label)
+                if t.context:
+                    bits.append(t.context)
+                verdict = self._tag_verdict(t.size_bytes)
+                if verdict:
+                    bits.append(verdict)
+                self.pull_box.addItem("  ·  ".join(bits), t.tag)
+                # Default to the biggest plain tag that stays on the GPU.
+                if group is plain and verdict in (tr("fits the GPU"), tr("just fits the GPU")):
+                    if best is None or t.size_bytes > best.size_bytes:
+                        best = t
+        if best is None:
+            # Nothing stays on the GPU: the smallest build is the kindest guess.
+            sized = [t for t in (plain or local) if t.size_bytes]
+            best = min(sized, key=lambda t: t.size_bytes) if sized else None
+        index = self.pull_box.findData(best.tag if best else f"{name}:latest")
+        self.pull_box.setCurrentIndex(max(0, index))
+        self.pull_box.blockSignals(False)
+        self.pull_box.lineEdit().setCursorPosition(0)
+        self._describe_pull_tag()
+
+    def _on_tags_failed(self, token, _error: str) -> None:
+        if token[0] == self._tags_token:
+            self.tag_hint.setText(
+                tr("No version list available — the default version will be downloaded.")
+            )
+
+    def _describe_pull_tag(self, *_args) -> None:
+        tag = self._selected_pull_tag()
+        info = getattr(self, "_lib_tags", {}).get(tag)
+        if info is None:
+            self.tag_hint.hide()
+            return
+        bits = [info.size_label and tr("{size} download").format(size=info.size_label)]
+        if info.context:
+            bits.append(tr("{tokens} context").format(tokens=info.context))
+        if info.inputs:
+            bits.append(info.inputs)
+        verdict = self._tag_verdict(info.size_bytes)
+        if verdict:
+            bits.append(verdict)
+        self.tag_hint.setText("  ·  ".join(b for b in bits if b))
+        self.tag_hint.show()
+
     # ── model download ───────────────────────────────────────────────────
     def _selected_pull_tag(self) -> str:
-        # Prefer the item's stored tag; fall back to typed text (before the em-dash).
-        data = self.pull_box.currentData()
-        if data:
-            return str(data)
-        return self.pull_box.currentText().split("—")[0].strip()
+        # Prefer the item's stored tag; fall back to typed text.
+        text = self.pull_box.currentText().strip()
+        index = self.pull_box.currentIndex()
+        if index >= 0 and text == self.pull_box.itemText(index):
+            data = self.pull_box.itemData(index)
+            if data:
+                return str(data)
+        return text.split("·")[0].split("—")[0].strip()
 
     def _start_pull(self) -> None:
         if getattr(self, "_pull_worker", None) and self._pull_worker.isRunning():
@@ -1005,7 +1388,7 @@ class SettingsDialog(QDialog):
 
     def _on_pull_ok(self, model: str) -> None:
         self.pull_btn.setEnabled(True)
-        self.pull_btn.setText("Download")
+        self.pull_btn.setText(tr("Download"))
         self.pull_bar.setRange(0, 100)
         self.pull_bar.setValue(100)
         self.pull_bar.setFormat(tr("Done ✓"))
@@ -1013,12 +1396,11 @@ class SettingsDialog(QDialog):
             tr("✓ '{model}' downloaded and ready.").format(model=model)
         )
         # Refresh the installed list and select the freshly pulled model.
-        self._refresh_ollama_models()
-        self.ollama_model.setCurrentText(model)
+        self._refresh_ollama_models(select=model)
 
     def _on_pull_failed(self, error: str) -> None:
         self.pull_btn.setEnabled(True)
-        self.pull_btn.setText("Download")
+        self.pull_btn.setText(tr("Download"))
         self.pull_bar.hide()
         self.pull_status.setText(f"✕ {error}")
 
@@ -1035,13 +1417,8 @@ class SettingsDialog(QDialog):
     def _refresh_gemini_models(self) -> None:
         self.status.setText(tr("Querying Gemini…"))
         backend = GeminiBackend(self.gemini_key.text().strip())
-        models = backend.available_models()
-        current = self.gemini_model.currentText()
-        self.gemini_model.clear()
-        self.gemini_model.addItems(models)
-        if current:
-            self.gemini_model.setCurrentText(current)
-        self.status.setText(f"Found {len(models)} model(s).")
+        self._run(backend.available_models, token=self.gemini_model,
+                  on_done=self._fill_model_box)
 
     def _load(self) -> None:
         c = self.config
@@ -1071,7 +1448,12 @@ class SettingsDialog(QDialog):
         self.gemini_model.setCurrentText(c.get("gemini_model"))
 
         self.openai_key.setText(c.get("openai_api_key"))
-        self.openai_base.setCurrentText(c.get("openai_base_url"))
+        base = (c.get("openai_base_url") or "").rstrip("/")
+        base_index = self.openai_base.findData(base)
+        if base_index >= 0:
+            self.openai_base.setCurrentIndex(base_index)
+        else:
+            self.openai_base.setCurrentText(base)
         self.openai_model.addItems(OPENAI_MODELS)
         self.openai_model.setCurrentText(c.get("openai_model"))
 
