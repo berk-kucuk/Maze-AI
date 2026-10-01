@@ -201,6 +201,10 @@ def export_markdown(conv: Conversation) -> str:
         content = (msg.get("content") or "").strip()
         if not content:
             continue
+        if role == "user":
+            from .agent.prompts import display_text
+
+            content = display_text(content)
         who = "You" if role == "user" else "Maze AI"
         lines.append(f"### {who}")
         lines.append("")

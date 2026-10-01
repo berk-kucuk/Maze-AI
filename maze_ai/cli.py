@@ -19,6 +19,7 @@ from .agent.prompts import guess_language
 from .config import Config
 from .llm import build_backend
 from .llm.base import LLMError
+from .style import EmojiFilter, persona_block, strip_emoji
 
 log = logging.getLogger(__name__)
 
@@ -145,10 +146,11 @@ def _language_note(text: str) -> str:
 def _complete(system: str, user: str, config: Config | None = None) -> str:
     config = config or Config()
     backend = build_backend(config)
-    return backend.chat([
+    reply = backend.chat([
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]).strip()
+    return strip_emoji(reply) if config.get("no_emoji") else reply
 
 
 def fix_command(command: str, quiet: bool = False) -> int:
@@ -255,16 +257,30 @@ def ask_cli(question: str) -> int:
         question += f"\n\nContext:\n{piped.strip()[:6000]}"
     config = Config()
     backend = build_backend(config)
+    no_emoji = bool(config.get("no_emoji"))
+    system = (
+        ASK_SYSTEM + "\n\n" + persona_block(config.get("persona"), no_emoji)
+        + _language_note(question)
+    )
     messages = [
-        {"role": "system", "content": ASK_SYSTEM + _language_note(question)},
+        {"role": "system", "content": system},
         {"role": "user", "content": question},
     ]
+    flt = EmojiFilter() if no_emoji else None
+
+    def write(chunk: str) -> None:
+        sys.stdout.write(flt.feed(chunk) if flt else chunk)
+        sys.stdout.flush()
+
     try:
-        for chunk in backend.chat_stream(messages):
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
+        # chat_ex, not chat_stream: Ollama's chat_stream is a compatibility
+        # shim that only yields once the whole answer is in, so the terminal
+        # sat blank for the full generation.
+        backend.chat_ex(messages, stream=True, on_text=write)
     except LLMError as exc:
         print(f"\nmaze-ai: {exc}", file=sys.stderr)
         return 1
+    if flt:
+        sys.stdout.write(flt.flush())
     print()
     return 0

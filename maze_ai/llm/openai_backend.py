@@ -48,10 +48,16 @@ class OpenAIBackend(LLMBackend):
         api_key: str = "",
         model: str = "gpt-4o-mini",
         base_url: str = "https://api.openai.com/v1",
+        temperature: float = 0.4,
     ) -> None:
         self.api_key = api_key or ""
         self.model = model or "gpt-4o-mini"
         self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self.temperature = float(temperature)
+        #: Reasoning models (gpt-5, o-series) accept only their default
+        #: temperature and answer 400 to anything else. Learned on the first
+        #: refusal, then the parameter is simply left out.
+        self._fixed_temperature = False
 
     # ── helpers ──────────────────────────────────────────────────────────
     def _headers(self) -> dict:
@@ -90,21 +96,40 @@ class OpenAIBackend(LLMBackend):
             raise LLMError(f"API error {resp.status_code}: {resp.text[:300]}")
 
     # ── API ──────────────────────────────────────────────────────────────
-    def chat(self, messages: list[Message]) -> str:
-        url = f"{self.base_url}/chat/completions"
+    def _payload(self, messages: list[Message], stream: bool) -> dict:
         payload = {
             "model": self.model,
             "messages": self._prepare(messages),
-            "temperature": 0.4,
-            "stream": False,
+            "stream": stream,
         }
+        if not self._fixed_temperature:
+            payload["temperature"] = self.temperature
+        return payload
+
+    def _post(self, payload: dict, **kwargs):
+        """POST a completion, retrying once without temperature if refused."""
+        url = f"{self.base_url}/chat/completions"
         try:
             resp = request_with_retry(
-                "POST", url, headers=self._headers(), json=payload, timeout=600
+                "POST", url, headers=self._headers(), json=payload, **kwargs
             )
+            if (
+                resp.status_code == 400
+                and "temperature" in payload
+                and "temperature" in resp.text
+            ):
+                self._fixed_temperature = True
+                payload = {k: v for k, v in payload.items() if k != "temperature"}
+                resp = request_with_retry(
+                    "POST", url, headers=self._headers(), json=payload, **kwargs
+                )
         except Exception as exc:  # noqa: BLE001
             raise LLMError(f"Could not reach the API at {self.base_url} ({exc}).") from exc
         self._raise_for_status(resp)
+        return resp
+
+    def chat(self, messages: list[Message]) -> str:
+        resp = self._post(self._payload(messages, stream=False), timeout=600)
         data = resp.json()
         choices = data.get("choices") or []
         if not choices:
@@ -115,22 +140,14 @@ class OpenAIBackend(LLMBackend):
         return content
 
     def chat_stream(self, messages: list[Message]) -> Iterator[str]:
-        url = f"{self.base_url}/chat/completions"
-        payload = {
-            "model": self.model,
-            "messages": self._prepare(messages),
-            "temperature": 0.4,
-            "stream": True,
-        }
-        try:
-            resp = request_with_retry(
-                "POST", url, headers=self._headers(), json=payload,
-                stream=True, timeout=(10, 600),
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise LLMError(f"Could not reach the API at {self.base_url} ({exc}).") from exc
-        self._raise_for_status(resp)
+        resp = self._post(
+            self._payload(messages, stream=True), stream=True, timeout=(10, 600)
+        )
+        with resp:
+            yield from self._sse_chunks(resp)
 
+    @staticmethod
+    def _sse_chunks(resp) -> Iterator[str]:
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue

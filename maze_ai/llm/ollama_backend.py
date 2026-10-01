@@ -32,6 +32,7 @@ from .hardware import (
     context_that_fits,
     detect_gpus,
     estimate_fit,
+    kv_bytes_per_token,
     system_ram_gb,
     total_vram_bytes,
 )
@@ -74,6 +75,7 @@ def auto_context(
     *,
     weights_bytes: int = 0,
     vram_bytes: int | None = None,
+    per_token: int | None = None,
 ) -> int:
     """Pick a context window that keeps the model on the GPU if it can.
 
@@ -83,7 +85,8 @@ def auto_context(
     maximum, what the system RAM can carry, and what is left of VRAM after the
     weights. When the weights don't fit in VRAM at all the GPU limit is
     dropped — the model is running from RAM anyway, and a bigger window there
-    costs nothing but memory.
+    costs nothing but memory. ``per_token`` is the model's own KV-cache cost
+    (see :func:`kv_bytes_per_token`); without it a generic figure is used.
     """
     ram = system_ram_gb() if ram_gb is None else ram_gb
     if ram >= 32:
@@ -98,10 +101,12 @@ def auto_context(
     vram = total_vram_bytes() if vram_bytes is None else vram_bytes
     if weights_bytes and vram:
         weights_fit = estimate_fit(
-            weights_bytes, _CTX_FLOOR, total_bytes=vram
+            weights_bytes, _CTX_FLOOR, total_bytes=vram, per_token=per_token
         ).fits
         if weights_fit:
-            budget = min(budget, context_that_fits(weights_bytes, total_bytes=vram))
+            budget = min(budget, context_that_fits(
+                weights_bytes, total_bytes=vram, per_token=per_token
+            ))
 
     limit = int(model_limit or 0)
     if limit <= 0:
@@ -176,6 +181,7 @@ class OllamaBackend(LLMBackend):
         keep_alive: str = "30m",
         think: bool = False,
         num_gpu: int = 0,
+        temperature: float = 0.4,
     ) -> None:
         self.host = (host or DEFAULT_HOST).rstrip("/")
         self.model = model or "llama3.1"
@@ -190,6 +196,8 @@ class OllamaBackend(LLMBackend):
         #: is usually right; a manual value is the escape hatch when its
         #: estimate leaves VRAM on the table or overcommits it.
         self.num_gpu = int(num_gpu or 0)
+        #: Sampling temperature — the "creativity" setting.
+        self.temperature = float(temperature)
         #: /api/show results, which are authoritative about capabilities.
         self._info_cache: dict[str, dict] = {}
         #: (timestamp, usable_bytes, other_usage_bytes) — VRAM accounting is
@@ -199,6 +207,12 @@ class OllamaBackend(LLMBackend):
         #: because the listing under-reports capabilities on some servers —
         #: granite, for one, lists only "completion" there but "tools" here.
         self._tags_cache: dict[str, dict] = {}
+        #: The automatic context, worked out once per model and then kept.
+        #: Ollama reloads a model whenever num_ctx changes, so a window that
+        #: followed every wobble in free VRAM (a browser tab opening) would
+        #: cost a full reload on the next message. Settings rebuild the
+        #: backend, which is when it is worked out again.
+        self._ctx_pin: dict[str, int] = {}
 
     # ── model capabilities ───────────────────────────────────────────────
     def model_info(self, model: str = "") -> dict:
@@ -231,6 +245,7 @@ class OllamaBackend(LLMBackend):
                     "parameter_size": details.get("parameter_size", ""),
                     "family": details.get("family", ""),
                     "quantization": details.get("quantization_level", ""),
+                    "kv_per_token": kv_bytes_per_token(model_info),
                 }
         except (requests.RequestException, ValueError) as exc:
             log.debug("could not read model info for %s: %s", model, exc)
@@ -262,6 +277,16 @@ class OllamaBackend(LLMBackend):
     def context_limit(self) -> int:
         """The model's own maximum context, or 0 if unknown."""
         return int(self.model_info().get("context_length") or 0)
+
+    def kv_per_token(self, model: str = "", fetch: bool = True) -> int | None:
+        """KV-cache bytes per context token for a model (None if unknown).
+
+        ``fetch=False`` uses only what is already cached, for callers that
+        loop over every installed model and must not make a request each.
+        """
+        model = model or self.model
+        info = self.model_info(model) if fetch else (self._info_cache.get(model) or {})
+        return int(info.get("kv_per_token") or 0) or None
 
     # ── how much VRAM is really available ────────────────────────────────
     def usable_vram(self) -> tuple[int, int]:
@@ -311,12 +336,21 @@ class OllamaBackend(LLMBackend):
     def resolved_ctx(self) -> int:
         """The window we will actually ask for."""
         if isinstance(self.num_ctx, str) or not self.num_ctx:
+            pinned = self._ctx_pin.get(self.model)
+            if pinned:
+                return pinned
             usable, _ = self.usable_vram()
-            return auto_context(
+            chosen = auto_context(
                 self.context_limit(),
                 weights_bytes=self.weights_bytes(),
                 vram_bytes=usable,
+                per_token=self.kv_per_token(),
             )
+            # Only pin a figure that was worked out from real data: before
+            # the server answers, the guess is just the RAM tier.
+            if self.model_info():
+                self._ctx_pin[self.model] = chosen
+            return chosen
         return max(2048, int(self.num_ctx))
 
     # ── where the model is running ───────────────────────────────────────
@@ -349,6 +383,7 @@ class OllamaBackend(LLMBackend):
         return estimate_fit(
             self.weights_bytes(model), context,
             total_bytes=usable, free_bytes=usable,
+            per_token=self.kv_per_token(model),
         )
 
     def best_context(self, model: str = "") -> int:
@@ -364,7 +399,8 @@ class OllamaBackend(LLMBackend):
         if not weights:
             return self.resolved_ctx()
         usable, _ = self.usable_vram()
-        return auto_context(limit, weights_bytes=weights, vram_bytes=usable)
+        return auto_context(limit, weights_bytes=weights, vram_bytes=usable,
+                            per_token=self.kv_per_token(model))
 
     def models_that_fit(self, context: int = 0) -> list[str]:
         """Installed models expected to run fully on the GPU, largest first.
@@ -381,7 +417,10 @@ class OllamaBackend(LLMBackend):
             size = int(entry.get("size") or 0)
             if not size:
                 continue
-            report = estimate_fit(size, context, total_bytes=usable, free_bytes=usable)
+            report = estimate_fit(
+                size, context, total_bytes=usable, free_bytes=usable,
+                per_token=self.kv_per_token(entry["name"], fetch=False),
+            )
             if report.fits:
                 fitting.append((size, entry["name"]))
         # Biggest first: within what fits, more parameters is usually better.
@@ -433,7 +472,7 @@ class OllamaBackend(LLMBackend):
 
     # ── request shaping ──────────────────────────────────────────────────
     def _options(self) -> dict:
-        options = {"temperature": 0.4, "num_ctx": self.resolved_ctx()}
+        options = {"temperature": self.temperature, "num_ctx": self.resolved_ctx()}
         if self.num_gpu > 0:
             options["num_gpu"] = self.num_gpu
         return options
@@ -580,8 +619,6 @@ class OllamaBackend(LLMBackend):
         thinking: list[str] = []
         calls: list[ToolCall] = []
         metrics: dict = {}
-        # `with` so an abandoned generation (the user pressed Stop) releases the
-        # socket instead of leaving the server generating into a dead pipe.
         # `with` so an abandoned generation (the user pressed Stop) releases
         # the socket instead of leaving the server generating into a dead pipe.
         with resp:

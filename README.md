@@ -4,7 +4,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.20.0-blue)
+![Version](https://img.shields.io/badge/version-1.21.0-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0--or--later-green)
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Qt](https://img.shields.io/badge/Qt-6.6+-teal)
@@ -21,6 +21,7 @@
 - **"Quick Ask"**: Copy text → hit the hotkey → get an answer. One-button clipboard actions: Explain, Fix, Translate, Summarize.
 - **Vision ready**: Supports vision models (e.g., `llava`) when you read the screen or paste images.
 - **Keyboard-first**: every action has a shortcut — press **Ctrl+/** in the app for the full list. See [Keyboard shortcuts](#keyboard-shortcuts).
+- **Fits your GPU**: the context window is sized from each model's real KV-cache cost (read from Ollama, hybrid and sliding-window models included) and your free VRAM, then kept fixed so the model isn't reloaded whenever another app takes some VRAM.
 - **Safe by design**: model output never renders as HTML, links open only after you see the real address, and chats, backups and pasted screenshots are stored owner-only (0600/0700).
 
 ## Install
@@ -142,42 +143,41 @@ Open **⚙ Settings** (inside the chat window) to:
 - Set the global hotkey
 - Adjust token reveal speed and other animations
 - Configure tool approval gating (for sensitive operations)
+- Pick the assistant's **personality** — Balanced, Concise, Detailed teacher, Friendly, Professional or Witty hacker — and its **creativity** (Precise / Balanced / Creative)
+- Keep answers emoji-free: emoji are swapped for text emoticons like `:)` `:P` `:/` (on by default, even while an answer streams)
 
 ## Architecture
 
 ```
 maze_ai/
-├── app.py              # Main window, event loop
-├── config.py           # Settings, hotkey binding
-├── i18n.py             # Turkish/English translations (100+ strings)
+├── app.py              # Entry point, single-instance socket, tray wiring
+├── cli.py              # Headless --fix / --ask-cli / --shell-init
+├── config.py           # Settings (~/.config/maze-ai/config.json, 0600)
+├── style.py            # Personality presets, creativity, emoji → emoticon filter
+├── history.py          # Saved chats; reminders.py — reminder store + time parser
+├── i18n.py             # Turkish / English interface strings
 ├── agent/
-│   ├── agent.py        # Agentic loop: parse tool calls, execute, loop
-│   ├── tools.py        # read_clipboard, read_file, read_dir, recent_commands, read_screen, capture_region, read_window
-│   └── prompts.py      # System prompt, language detection, morphological Turkish analysis
+│   ├── agent.py        # Agent loop: native tool calling or JSON protocol, approvals
+│   ├── tools.py        # Every tool, its schema and argument coercion
+│   ├── safety.py       # Read-only / dangerous / secret / exfiltration checks
+│   └── prompts.py      # System prompt assembly, language detection
 ├── llm/
-│   ├── backend.py      # Ollama HTTP API client
-│   └── tokenizer.py    # Token counting (for context window awareness)
-└── ui/
-    ├── theme.py        # Design tokens (colours, radii, type) and the global QSS
-    ├── icons.py        # Vector line icons rendered from inline SVG
-    ├── richtext.py     # Safe rendering: plain-text labels, HTML-free Markdown, link checks
-    ├── dialogs.py      # Shared frameless dialogs, shortcuts sheet, toasts
-    ├── effects.py      # AuroraCard: glass background (animates only while focused)
-    ├── quick_ask.py    # Clipboard mode, one-click actions, pill-shaped input field
-    ├── chat_view.py    # Message bubbles, 60 FPS token reveal queue, auto-scroll
-    ├── input_bar.py    # Main question input, auto-sizing
-    ├── approval.py     # Approval dialog for sensitive tools
-    └── worker.py       # Qt Worker thread, LLM/agent execution
+│   ├── ollama_backend.py   # Ollama: capabilities, context sizing, keep-alive, pulls
+│   ├── hardware.py         # GPU/VRAM detection, KV-cache and fit estimates
+│   ├── gemini_backend.py   # Google Gemini REST
+│   ├── openai_backend.py   # Any OpenAI-compatible /v1 endpoint
+│   └── library.py          # ollama.com model browser
+└── ui/                 # PySide6 windows: main_window, quick_ask, settings_dialog,
+                        # chat_view, approval, reminders_dialog, sidebar, tray, …
 ```
 
 ### Data Flow
 
-1. **User types** → `input_bar` captures text
-2. **Agent loop** → `prompts.py` assembles system + user message
-3. **LLM call** → `backend.py` streams tokens from Ollama
-4. **Token reveal** → `chat_view._reveal_timer` drains queue at 60 FPS (24 chars/frame max)
-5. **Tool calls** → Agent detects tool use, executes (e.g., read clipboard), loops
-6. **Final response** → Rendered as markdown with syntax highlighting
+1. **User types** → the composer hands the text (and any images) to an `AgentWorker` thread
+2. **System prompt** → `prompts.py` describes only the enabled tools, the personality and the reply language
+3. **LLM call** → the backend streams tokens; Ollama uses native tool calling when the model supports it, schema-constrained JSON otherwise
+4. **Tool calls** → arguments are type-checked, relative paths anchored at the session directory, sensitive actions confirmed, results fenced as untrusted data
+5. **Final answer** → emoji are swapped for emoticons and the Markdown is rendered without HTML
 
 ## Turkish Language
 
@@ -206,19 +206,25 @@ Because Turkish speakers often type without diacritics (e.g., "gorebiliyor" not 
 
 ## Tools (Agentic Capabilities)
 
-The agent can call these tools *with your approval*:
+Tools are grouped, and each group can be switched off in **Settings → Behaviour & safety** (fewer tools = less context used on small local models).
 
-| Tool | Purpose | Requires Approval |
-|------|---------|---|
-| `read_clipboard` | Get clipboard text | No |
-| `read_file(path)` | Read a file (text only) | No |
-| `read_dir(path)` | List directory contents | No |
-| `recent_commands(count)` | Read shell history (zsh/bash/fish) | **Yes** |
-| `read_screen()` | Capture + OCR the screen (requires tesseract) | **Yes** |
-| `capture_region()` | Select a region to capture + OCR | **Yes** |
-| `read_window(name, lang)` | Focus a named window, capture + OCR it | **Yes** |
+| Group | Tools |
+|------|------|
+| Shell | `run_command`, `launch_app`, `recent_commands` |
+| Files | `read_file`, `write_file`, `edit_file`, `append_file`, `list_dir`, `search_files`, `create_dir`, `delete_path`, `move_path`, `copy_path`, `undo_file_change` |
+| Web | `web_search`, `fetch_url` |
+| Desktop | `screenshot`, `read_screen`, `read_window`, `ocr_image`, `clipboard_copy`, `notify` |
+| Reminders | `add_reminder`, `list_reminders`, `remove_reminder` |
 
-Sensitive tools require user approval before execution. You can disable approval gating in **Settings** → **Tool Approval** if you trust the LLM.
+Every shell command (and every app `launch_app` would start) goes through a three-tier rule set (`maze_ai/agent/rules.py`, listed in **Settings → Command rules**):
+
+- **Never run**, in any mode, even after an approval: gaining root (`sudo`, `su`, `doas`, `pkexec`), deleting or moving `/` or the home folder, formatting or overwriting disks, piping a download into a shell, reverse shells, killing every process, fork bombs, recursive permission changes on `/` or home.
+- **Always ask**, even in Autonomous mode, and never remembered: recursive or forced deletes, discarding git work (`reset --hard`, `push --force`…), killing processes, stopping services, powering off, uninstalling software.
+- **Run without asking** in Ask mode: read-only inspections such as `ls`, `cd`, `cat`, `grep`, `find`, `git status`, `pacman -Q…`, `systemctl status`, `journalctl`.
+
+You can add your own blocked and safe commands (a command prefix like `git push`, or `re:` plus a regular expression); your safe entries never outrank a built-in block or confirmation. Reading keys, tokens or shell history, and requests that carry data out of the machine, are always confirmed. Overwritten or deleted files are backed up and can be restored with `undo_file_change`.
+
+Reminders understand times like `in 10 minutes`, `1 saat 30 dakika sonra`, `18:30`, `18.30`, `akşam 8`, `9pm`, `yarın 10:00` and `16.10.2026 14:00`.
 
 ## Configuration
 
@@ -239,7 +245,7 @@ Chats, reminders and undo backups live in `~/.local/share/maze-ai/`; pasted imag
 pytest -v
 ```
 
-All 415 tests pass (UI behavior, streaming, language detection, tool execution).
+All 788 tests pass (UI behavior, streaming, language detection, tool execution). Tests that talk to a real Ollama server run with `MAZE_AI_LIVE=1` (optionally `MAZE_AI_LIVE_MODEL=<name>`).
 
 ### Linting
 
@@ -299,4 +305,4 @@ GPL-3.0 or later. See [LICENSE](LICENSE) for details.
 
 ---
 
-**Get started**: `ollama pull mistral && maze-ai` 🚀
+**Get started**: `ollama pull mistral && maze-ai`

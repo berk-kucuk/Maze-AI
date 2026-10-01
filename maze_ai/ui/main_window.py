@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..agent import Agent, AgentEvent, ApprovalRequest
+from ..agent.prompts import display_text
 from ..agent.tools import set_reminder_store
 from ..config import Config
 from ..history import ChatStore, Conversation, export_markdown
@@ -79,24 +80,7 @@ class MainWindow(QWidget):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.config = config
-        self.agent = Agent(
-            build_backend(config),
-            mode=config.get("agent_mode"),
-            max_steps=int(config.get("max_steps")),
-            command_timeout=int(config.get("command_timeout")),
-            language=config.get("output_language"),
-            custom_instructions=config.get("custom_instructions"),
-            context_char_budget=int(config.get("context_char_budget")),
-            stream_responses=bool(config.get("stream_responses")),
-            block_dangerous=bool(config.get("block_dangerous_commands")),
-            auto_approve_readonly=bool(config.get("auto_approve_readonly")),
-            always_allow=list(config.get("always_allow") or []),
-            guard_secrets=bool(config.get("guard_secrets")),
-            confirm_egress=bool(config.get("confirm_network_egress")),
-            native_tools=bool(config.get("native_tools")),
-            constrain_json=bool(config.get("constrain_json")),
-            tool_groups=list(config.get("tool_groups") or []),
-        )
+        self.agent = Agent.from_config(config)
         self.worker: AgentWorker | None = None
         self._resolver: ModelResolveWorker | None = None
         # Local-model telemetry and server health, filled in off the UI thread.
@@ -487,15 +471,14 @@ class MainWindow(QWidget):
 
         QTimer.singleShot(400, check)
 
-    def _quick_to_chat(self, question: str, answer: str) -> None:
-        """Carry a Quick Ask exchange into a real, saved conversation."""
-        if not question:
+    def _quick_to_chat(self, messages: list) -> None:
+        """Carry a Quick Ask conversation into a real, saved chat."""
+        messages = [m for m in messages or [] if m.get("role") in ("user", "assistant")]
+        if not messages:
             return
         self._save_current()
         self.conversation = Conversation()
-        self.conversation.messages.append({"role": "user", "content": question})
-        if answer:
-            self.conversation.messages.append({"role": "assistant", "content": answer})
+        self.conversation.messages.extend(dict(m) for m in messages)
         self.conversation.touch()
         self.agent.history = self.conversation.messages
         self._render_conversation()
@@ -539,6 +522,7 @@ class MainWindow(QWidget):
         # Only rebuild when the resolver actually switched models on us.
         if model and model != getattr(self.agent.backend, "model", model):
             self.agent.backend = build_backend(self.config)
+            self._sync_quick_agent()
         self._refresh_status()
         self.check_ollama_async()
 
@@ -601,7 +585,15 @@ class MainWindow(QWidget):
         backend = self.ollama_backend()
         if backend is None or not runtime.spilled:
             self.status_label.setToolTip("")
+            self._placement_key = None
             return
+        # The status line refreshes after every model call; working out the
+        # explanation means an HTTP call and an nvidia-smi spawn on the UI
+        # thread, so do it once per placement, not once per refresh.
+        key = (backend.model, runtime.size, runtime.size_vram)
+        if getattr(self, "_placement_key", None) == key:
+            return
+        self._placement_key = key
         try:
             report = backend.fit()
             usable, _ = backend.usable_vram()
@@ -633,6 +625,7 @@ class MainWindow(QWidget):
         self.config.set("ollama_num_ctx", int(best))
         self.config.save()
         self.agent.backend = build_backend(self.config)
+        self._sync_quick_agent()
         self.shrink_ctx_btn.hide()
         self.status_label.setText(
             tr("Context set to {tokens}. The model will reload on the next message.")
@@ -708,7 +701,7 @@ class MainWindow(QWidget):
     def _check_reminders(self) -> None:
         self.reminders.load()  # pick up reminders added by the agent tools
         for r in self.reminders.due():
-            self.notify(tr("⏰ Reminder"), r.text)
+            self.notify(tr("Reminder"), r.text)
 
     def greet(self) -> None:
         """Send a one-time greeting notification in the chosen language."""
@@ -760,25 +753,21 @@ class MainWindow(QWidget):
         if dlg.exec():
             # Rebuild backend but keep the conversation.
             resolve_ollama_model(self.config)
-            self.agent.backend = build_backend(self.config)
-            self.agent.mode = self.config.get("agent_mode")
-            self.agent.max_steps = int(self.config.get("max_steps"))
-            self.agent.command_timeout = int(self.config.get("command_timeout"))
-            self.agent.language = self.config.get("output_language")
-            self.agent.custom_instructions = self.config.get("custom_instructions")
-            self.agent.context_char_budget = int(self.config.get("context_char_budget"))
-            self.agent.stream_responses = bool(self.config.get("stream_responses"))
-            self.agent.block_dangerous = bool(self.config.get("block_dangerous_commands"))
-            self.agent.auto_approve_readonly = bool(self.config.get("auto_approve_readonly"))
-            self.agent.always_allow = list(self.config.get("always_allow") or [])
-            self.agent.guard_secrets = bool(self.config.get("guard_secrets"))
-            self.agent.confirm_egress = bool(self.config.get("confirm_network_egress"))
-            self.agent.native_tools = bool(self.config.get("native_tools"))
-            self.agent.constrain_json = bool(self.config.get("constrain_json"))
-            self.agent.tool_groups = list(self.config.get("tool_groups") or [])
+            self.agent.apply_config(self.config)
+            self._sync_quick_agent()
             self._last_metrics = {}
             self._refresh_status()
             self.check_ollama_async()
+
+    def _sync_quick_agent(self) -> None:
+        """Quick Ask lives on between uses: hand it the new settings too.
+
+        Without this, switching to Chat-only mode or another model in Settings
+        left the floating window running on the old ones until a restart.
+        """
+        window = getattr(self, "_quick", None)
+        if window is not None:
+            window.agent.apply_config(self.config)
 
     def open_reminders(self) -> None:
         RemindersDialog(self.reminders, self).exec()
@@ -815,7 +804,7 @@ class MainWindow(QWidget):
             role = msg.get("role")
             content = msg.get("content", "")
             if role == "user":
-                self.chat.add_user(content)
+                self.chat.add_user(display_text(content))
             elif role == "assistant":
                 if content.startswith("(error)"):
                     self.chat.add_error(content[len("(error)"):].strip())
@@ -968,7 +957,7 @@ class MainWindow(QWidget):
         self.conversation.touch()
         self.chat.set_regenerate_available(False)
         attached = tr("{count} image(s) attached").format(count=len(images))
-        shown = text + (f"\n\n📎 {attached}" if images else "")
+        shown = text + (f"\n\n[{attached}]" if images else "")
         self.chat.add_user(shown)
         self.input_bar.set_busy(True)
         self.status_dot.set_active(True)
@@ -1017,6 +1006,10 @@ class MainWindow(QWidget):
         elif ev.kind == "denied":
             self.chat.add_step("denied", tool=ev.tool,
                                text=tr("Action denied by user."), ok=False)
+        elif ev.kind == "blocked":
+            self.chat.add_step("denied", tool=ev.tool, ok=False,
+                               text=tr("Blocked by the safety rules: {rule}").format(
+                                   rule=tr(ev.text)))
         elif ev.kind == "thinking":
             # Live reasoning from a thinking model: keep it in the status row,
             # never in the answer bubble.

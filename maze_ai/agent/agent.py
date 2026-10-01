@@ -10,12 +10,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from ..config import MODE_ASK, MODE_AUTO, MODE_CHAT
+from ..config import MODE_ASK, MODE_AUTO, MODE_CHAT, Config
 from ..llm.base import LLMBackend, LLMError, LLMReply
+from ..style import PERSONA_BALANCED, EmojiFilter, strip_emoji
 from .prompts import build_system_prompt
+from .rules import blocked_rule, classify, launch_blocked
 from .safety import (
     is_dangerous_command,
-    is_readonly_command,
     is_sensitive_path,
     looks_like_exfiltration,
     touches_sensitive_path,
@@ -23,12 +24,14 @@ from .safety import (
 from .tools import (
     EGRESS_TOOLS,
     IMPERSONATION_TOOLS,
-    SCREEN_TOOLS,
     PROTOCOL_SCHEMA,
+    SCREEN_TOOLS,
     SENSITIVE_TOOLS,
     SIDE_EFFECT_TOOLS,
     TOOLS,
     ToolResult,
+    clip_text,
+    coerce_args,
     tool_schemas,
     tools_for_groups,
 )
@@ -76,13 +79,14 @@ REASON_EGRESS_SAVE = "it downloads content and writes it to a file"
 REASON_EGRESS_URL = "this URL carries data out to a remote server"
 REASON_SENSITIVE = "it touches a sensitive path ({detail})"
 REASON_DESTRUCTIVE = "this command is destructive and cannot be undone"
+REASON_RULE = "it matches the safety rule “{detail}”"
 REASON_COMMAND = "it runs a command on your machine"
 REASON_CHANGES = "it changes something on your machine"
 REASON_SCREEN = "it photographs your screen and shows the result to the model"
 REASON_IMPERSONATION = "it puts a message on your desktop under Maze AI's name"
 
 #: Reasons that must be confirmed every single time — never "always allow".
-UNSKIPPABLE_REASONS = (REASON_SENSITIVE, REASON_DESTRUCTIVE)
+UNSKIPPABLE_REASONS = (REASON_SENSITIVE, REASON_DESTRUCTIVE, REASON_RULE)
 
 
 @dataclass
@@ -199,8 +203,22 @@ def _path_summary(path: str) -> str:
     return f"{target}\n(file · {size} bytes — a backup is kept so it can be undone)"
 
 
+def _blocked_feedback(rule: str) -> str:
+    return (
+        f"BLOCKED by Maze AI's safety rules ({rule}). This never runs inside Maze "
+        "AI, in any mode, and an approval cannot unlock it. Do not try to reach "
+        "the same result another way (other flags, a script, another tool). Tell "
+        "the user it was blocked and why; if they really need it, give them the "
+        "exact command to run in their own terminal."
+    )
+
+
 class _Cancelled(Exception):
     """Raised inside a stream callback to abandon a generation immediately."""
+
+
+class _NativeUnsupported(Exception):
+    """The server refused native tool calling for this model."""
 
 
 EmitFn = Callable[[AgentEvent], None]
@@ -358,6 +376,14 @@ class AnswerStreamer:
         return self._emitted
 
 
+#: Rough characters per token for budgeting. Turkish and code tokenise worse
+#: than English prose, so this errs low: a budget that is too small drops an
+#: old turn, one that is too large overflows the window.
+_CHARS_PER_TOKEN = 3
+#: Tokens kept free for the model's reply.
+_REPLY_RESERVE = 1024
+
+
 class Agent:
     def __init__(
         self,
@@ -377,6 +403,10 @@ class Agent:
         native_tools: bool = True,
         constrain_json: bool = True,
         tool_groups: list[str] | None = None,
+        persona: str = PERSONA_BALANCED,
+        no_emoji: bool = True,
+        blocked_commands: list[str] | None = None,
+        safe_commands: list[str] | None = None,
     ) -> None:
         self.backend = backend
         self.mode = mode
@@ -398,11 +428,59 @@ class Agent:
         #: Which tool groups the user has enabled. Fewer tools means a smaller
         #: definition block, which on a local model is context and latency.
         self.tool_groups = tool_groups
+        #: Personality preset and emoji policy (Settings → Personality).
+        self.persona = persona
+        self.no_emoji = no_emoji
+        #: The user's own additions to the command rule set (see rules.py).
+        self.blocked_commands = list(blocked_commands or [])
+        self.safe_commands = list(safe_commands or [])
         self.history: list[dict] = []  # persistent user/assistant turns
         # The shell's working directory for this conversation. `cd` inside a
         # run_command carries over to the next call instead of evaporating.
         self.cwd = str(Path.home())
         self._cancel = False
+        #: Models whose server rejected native tool calling at runtime.
+        self._native_refused: set[str] = set()
+
+    # ── configuration ────────────────────────────────────────────────────
+    @classmethod
+    def from_config(cls, config: Config) -> Agent:
+        """An agent set up from the user's settings, with its backend."""
+        from ..llm import build_backend
+
+        agent = cls(build_backend(config))
+        agent.apply_config(config, rebuild_backend=False)
+        return agent
+
+    def apply_config(self, config: Config, rebuild_backend: bool = True) -> None:
+        """Re-read every setting, keeping the conversation.
+
+        One place for this, so the main window, Quick Ask and the settings
+        dialog cannot drift apart when a new option is added.
+        """
+        if rebuild_backend:
+            from ..llm import build_backend
+
+            self.backend = build_backend(config)
+        self.mode = config.get("agent_mode")
+        self.max_steps = int(config.get("max_steps"))
+        self.command_timeout = int(config.get("command_timeout"))
+        self.language = config.get("output_language")
+        self.custom_instructions = config.get("custom_instructions")
+        self.context_char_budget = int(config.get("context_char_budget"))
+        self.stream_responses = bool(config.get("stream_responses"))
+        self.block_dangerous = bool(config.get("block_dangerous_commands"))
+        self.auto_approve_readonly = bool(config.get("auto_approve_readonly"))
+        self.always_allow = list(config.get("always_allow") or [])
+        self.guard_secrets = bool(config.get("guard_secrets"))
+        self.confirm_egress = bool(config.get("confirm_network_egress"))
+        self.native_tools = bool(config.get("native_tools"))
+        self.constrain_json = bool(config.get("constrain_json"))
+        self.tool_groups = list(config.get("tool_groups") or [])
+        self.persona = config.get("persona") or PERSONA_BALANCED
+        self.no_emoji = bool(config.get("no_emoji"))
+        self.blocked_commands = list(config.get("blocked_commands") or [])
+        self.safe_commands = list(config.get("safe_commands") or [])
 
     def reset(self) -> None:
         self.history.clear()
@@ -413,17 +491,59 @@ class Agent:
         self._cancel = True
 
     # ── context budgeting ────────────────────────────────────────────────
-    def _trim_history(self) -> list[dict]:
+    def _context_tokens(self) -> int:
+        """The backend's context window in tokens, or 0 when it has no limit
+        worth planning around (hosted models)."""
+        resolved = getattr(self.backend, "resolved_ctx", None)
+        if not callable(resolved):
+            return 0
+        try:
+            return int(resolved())
+        except Exception:  # noqa: BLE001 - a backend that can't say has no limit
+            return 0
+
+    def _history_budget(self, overhead_chars: int = 0) -> int:
+        """Characters of history that fit beside the prompt and the reply.
+
+        The configured budget is a ceiling; on a small local window the real
+        limit is what is left of the context after the system prompt, the tool
+        definitions and room for the answer. Overflowing it is not an error on
+        Ollama — it silently cuts the oldest part of the prompt, which can be
+        the system prompt itself.
+        """
+        budget = max(2000, int(self.context_char_budget))
+        ctx = self._context_tokens()
+        if ctx:
+            free = ctx - _REPLY_RESERVE - overhead_chars // _CHARS_PER_TOKEN
+            budget = min(budget, max(2000, free * _CHARS_PER_TOKEN))
+        return budget
+
+    def _observation_limit(self) -> int:
+        """How much of one tool result to hand back, given the window."""
+        ctx = self._context_tokens()
+        if not ctx:
+            return 12_000
+        # A third of the window at most: a single `journalctl` must not push
+        # the rest of the turn out of a 4k model's memory.
+        return max(1500, min(12_000, ctx * _CHARS_PER_TOKEN // 3))
+
+    def _trim_history(self, overhead_chars: int = 0) -> list[dict]:
         """Return the tail of history that fits the character budget.
 
         Keeps whole turns, most-recent first, so a long conversation never
-        blows past the model's context window. The system prompt is added by
-        the caller and isn't counted here.
+        blows past the model's context window. ``overhead_chars`` is what the
+        system prompt and tool definitions already take.
         """
-        budget = max(2000, int(self.context_char_budget))
+        budget = self._history_budget(overhead_chars)
         kept: list[dict] = []
         used = 0
         for msg in reversed(self.history):
+            if msg.get("role") == "assistant" and str(msg.get("content") or "").startswith(
+                "(error)"
+            ):
+                # A failed turn ("could not reach Ollama") is shown to the
+                # user, but replayed it reads as the model's own answer.
+                continue
             size = len(msg.get("content") or "") + 16
             if used + size > budget and kept:
                 break
@@ -448,7 +568,11 @@ class Agent:
             native_tools=enable_tools and self.uses_native_tools(),
             tool_names=self.enabled_tools(),
             user_message=user_message,
+            persona=self.persona,
+            no_emoji=self.no_emoji,
+            compact=self._compact_tools(),
         )
+        emit = self._styled(emit)
         user_msg: dict = {"role": "user", "content": user_message}
         if images:
             user_msg["images"] = list(images)
@@ -465,20 +589,76 @@ class Agent:
 
         try:
             if not enable_tools:
-                return self._chat_only(system, emit)
-            return self._run_agentic(system, emit, approve)
+                answer = self._chat_only(system, emit)
+            else:
+                answer = self._run_agentic(system, emit, approve)
+            return strip_emoji(answer) if self.no_emoji else answer
         finally:
             # Attachments belong to THIS turn only. Leaving them on the stored
             # message would re-encode and re-send every image on every later
             # turn — blowing up the context window (and the bill) for a picture
             # the user mentioned once.
             user_msg.pop("images", None)
+            if self.no_emoji:
+                # The stored answer is what the model sees as its own past
+                # style next turn: keep it emoji-free too.
+                last = self.history[-1] if self.history else None
+                if last is not None and last.get("role") == "assistant":
+                    last["content"] = strip_emoji(last.get("content") or "")
+
+    def _styled(self, emit: EmitFn) -> EmitFn:
+        """Wrap ``emit`` so the user never sees an emoji, even mid-stream."""
+        if not self.no_emoji:
+            return emit
+        state = {"filter": EmojiFilter()}
+
+        def styled(ev: AgentEvent) -> None:
+            if ev.kind == "stream":
+                text = state["filter"].feed(ev.text)
+                if text:
+                    emit(AgentEvent("stream", text=text, tool=ev.tool,
+                                    args=ev.args, ok=ev.ok))
+                return
+            if ev.kind in ("final", "stream_end"):
+                # The full text replaces whatever was streamed, so the
+                # filter starts over for the next bubble.
+                state["filter"] = EmojiFilter()
+                emit(AgentEvent(ev.kind, text=strip_emoji(ev.text), tool=ev.tool,
+                                args=ev.args, ok=ev.ok))
+                return
+            if ev.kind in ("thought", "thinking") and ev.text:
+                emit(AgentEvent(ev.kind, text=strip_emoji(ev.text), tool=ev.tool,
+                                args=ev.args, ok=ev.ok))
+                return
+            emit(ev)
+
+        return styled
 
     def _run_agentic(self, system: str, emit: EmitFn, approve: ApproveFn) -> str:
         """Run the turn with tools, by whichever protocol the model supports."""
         if self.uses_native_tools():
-            return self._run_native(system, emit, approve)
+            try:
+                return self._run_native(system, emit, approve)
+            except _NativeUnsupported:
+                # The model's name suggested tool calling but the server says
+                # otherwise: redo the turn on the JSON protocol instead of
+                # failing it. The prompt has to change with it.
+                log.info("native tools refused for this model; using the JSON protocol")
+                self._native_refused.add(str(getattr(self.backend, "model", "")))
+                system = build_system_prompt(
+                    True, self.language, self.custom_instructions, cwd=self.cwd,
+                    native_tools=False, tool_names=self.enabled_tools(),
+                    user_message=self._last_user_text(),
+                    persona=self.persona, no_emoji=self.no_emoji,
+                    compact=self._compact_tools(),
+                )
         return self._run_protocol(system, emit, approve)
+
+    def _last_user_text(self) -> str:
+        for msg in reversed(self.history):
+            if msg.get("role") == "user":
+                return str(msg.get("content") or "")
+        return ""
 
     def uses_native_tools(self) -> bool:
         """True when this turn will use the model's own function calling.
@@ -490,6 +670,7 @@ class Agent:
         return bool(
             self.native_tools
             and getattr(self.backend, "supports_native_tools", False)
+            and str(getattr(self.backend, "model", "")) not in self._native_refused
         )
 
     def enabled_tools(self) -> list[str]:
@@ -505,28 +686,37 @@ class Agent:
             return False
 
     def _schema(self) -> dict | None:
-        """The output schema to constrain protocol replies with, if any."""
+        """The output schema to constrain protocol replies with, if any.
+
+        The action enum lists only the enabled tools: a constrained model
+        then cannot even spell a tool the user switched off.
+        """
         if self.constrain_json and getattr(self.backend, "supports_schema", False):
-            return PROTOCOL_SCHEMA
+            schema = json.loads(json.dumps(PROTOCOL_SCHEMA))
+            schema["properties"]["action"]["enum"] = [*self.enabled_tools(), "final_answer"]
+            return schema
         return None
 
     # ── native function calling ──────────────────────────────────────────
     def _run_native(self, system: str, emit: EmitFn, approve: ApproveFn) -> str:
         """Tool loop for models with real function calling."""
-        messages: list[dict] = [
-            {"role": "system", "content": system}, *self._trim_history()
-        ]
         allowed = self.enabled_tools()
         tools = tool_schemas(allowed, compact=self._compact_tools())
+        overhead = len(system) + len(json.dumps(tools))
+        messages: list[dict] = [
+            {"role": "system", "content": system}, *self._trim_history(overhead)
+        ]
         last_sig: str | None = None
         repeats = 0
 
-        for _ in range(self.max_steps):
+        for step in range(self.max_steps):
             if self._cancel:
                 break
             try:
                 reply = self._call(messages, emit, tools=tools)
             except LLMError as exc:
+                if step == 0 and "does not support tools" in str(exc).lower():
+                    raise _NativeUnsupported from exc
                 emit(AgentEvent("error", text=str(exc), ok=False))
                 self.history.append({"role": "assistant", "content": f"(error) {exc}"})
                 return str(exc)
@@ -584,7 +774,15 @@ class Agent:
                 repeats = 0
                 last_sig = sig
 
+                call.arguments = self._prepare_args(call.name, call.arguments)
                 emit(AgentEvent("tool_call", tool=call.name, args=call.arguments))
+                rule = self._block_reason(call.name, call.arguments)
+                if rule:
+                    emit(AgentEvent("blocked", tool=call.name, args=call.arguments,
+                                    text=rule, ok=False))
+                    messages.append({"role": "tool", "tool_name": call.name,
+                                     "content": _blocked_feedback(rule)})
+                    continue
                 reason, detail = self._approval_reason(call.name, call.arguments)
                 if reason is not None and not approve(
                     ApprovalRequest(call.name, call.arguments, reason, detail)
@@ -597,13 +795,22 @@ class Agent:
                                    "Ask how to proceed, or finish without it.",
                     })
                     continue
+                # The approval dialog lets the user edit the command: the edited
+                # version has to clear the same rules.
+                rule = self._block_reason(call.name, call.arguments)
+                if rule:
+                    emit(AgentEvent("blocked", tool=call.name, args=call.arguments,
+                                    text=rule, ok=False))
+                    messages.append({"role": "tool", "tool_name": call.name,
+                                     "content": _blocked_feedback(rule)})
+                    continue
 
                 result = self._execute(call.name, call.arguments)
                 emit(AgentEvent("tool_result", tool=call.name,
                                 text=result.output, ok=result.ok))
                 messages.append({
                     "role": "tool", "tool_name": call.name,
-                    "content": wrap_observation(call.name, result.as_feedback()),
+                    "content": wrap_observation(call.name, self._feedback(result)),
                 })
                 if result.images and getattr(self.backend, "supports_vision", False):
                     # Tool messages can't carry images, so the capture comes in
@@ -628,7 +835,7 @@ class Agent:
         """The tool-using loop: think, call a tool, read the result, repeat."""
         # Working message list for this turn: system + as much recent history as
         # the context budget allows + turn-local scratch (tool calls/results).
-        messages = [{"role": "system", "content": system}, *self._trim_history()]
+        messages = [{"role": "system", "content": system}, *self._trim_history(len(system))]
 
         last_sig: str | None = None   # loop-guard: detect identical repeated calls
         repeats = 0
@@ -703,6 +910,8 @@ class Agent:
             action_input = obj.get("action_input") or {}
             if not isinstance(action_input, dict):
                 action_input = {}
+            if action in TOOLS:
+                action_input = self._prepare_args(action, action_input)
 
             if thought:
                 emit(AgentEvent("thought", text=thought))
@@ -752,10 +961,13 @@ class Agent:
 
             emit(AgentEvent("tool_call", tool=action, args=action_input, text=thought))
 
+            # The rule set first: a blocked command never reaches the approval
+            # dialog, and an edited one is checked again after it.
+            rule = self._block_reason(action, action_input)
             # Approval gate: side-effecting tools in "ask" mode, plus dangerous
             # commands even in autonomous mode. Read-only inspects and
             # remembered "always allow" commands skip the prompt.
-            reason, detail = self._approval_reason(action, action_input)
+            reason, detail = (None, "") if rule else self._approval_reason(action, action_input)
             if reason is not None:
                 if not approve(ApprovalRequest(action, action_input, reason, detail)):
                     emit(AgentEvent("denied", tool=action, args=action_input, ok=False))
@@ -766,13 +978,20 @@ class Agent:
                         "Do not retry it. Ask how to proceed or finish.",
                     })
                     continue
+                rule = self._block_reason(action, action_input)
+            if rule:
+                emit(AgentEvent("blocked", tool=action, args=action_input, text=rule, ok=False))
+                messages.append({"role": "assistant", "content": reply})
+                messages.append({"role": "user",
+                                 "content": "OBSERVATION: " + _blocked_feedback(rule)})
+                continue
 
             result = self._execute(spec.name, action_input)
             emit(AgentEvent("tool_result", tool=action, text=result.output, ok=result.ok))
             messages.append({"role": "assistant", "content": reply})
             observation: dict = {
                 "role": "user",
-                "content": wrap_observation(action, result.as_feedback()),
+                "content": wrap_observation(action, self._feedback(result)),
             }
             # A tool that produced a picture (read_screen) hands it over too,
             # but only to a model that can actually look at it.
@@ -838,10 +1057,12 @@ class Agent:
         model that thinks for twenty seconds, silence looks like a hang.
         """
         stream = self.stream_responses if stream is None else stream
+        received: list[str] = []
 
         def _text(chunk: str) -> None:
             if self._cancel:
                 raise _Cancelled
+            received.append(chunk)
             if on_text is not None:
                 on_text(chunk)
             else:
@@ -862,15 +1083,11 @@ class Agent:
                 on_thinking=_thinking if stream else None,
             )
         except _Cancelled:
-            return LLMReply()
+            # Keep what was already shown: Stop should freeze the answer where
+            # it is, not wipe a paragraph the user was reading.
+            return LLMReply(text="".join(received) if on_text is None else "")
         if reply.metrics:
-            context_limit = 0
-            resolved = getattr(self.backend, "resolved_ctx", None)
-            if callable(resolved):
-                try:
-                    context_limit = int(resolved())
-                except Exception:  # noqa: BLE001 - telemetry must never break a turn
-                    context_limit = 0
+            context_limit = self._context_tokens()
             emit(AgentEvent("metrics", args={
                 "tokens_per_second": reply.tokens_per_second,
                 "prefill_tokens_per_second": reply.prompt_tokens_per_second,
@@ -985,19 +1202,28 @@ class Agent:
         if action not in SIDE_EFFECT_TOOLS:
             return None, ""
 
-        if action == "run_command":
-            command = str(action_input.get("command", ""))
+        if action in ("run_command", "launch_app"):
+            if action == "run_command":
+                command = str(action_input.get("command", ""))
+            else:
+                command = f"{action_input.get('app', '')} {action_input.get('args', '')}".strip()
+            verdict = classify(command, self.blocked_commands, self.safe_commands)
             # The destructive check comes first on purpose. "Always confirm
             # destructive commands, even in autonomous mode" has to outrank a
             # remembered approval too, or one entry on the allow-list — however
             # it got there — silently disarms the guard from then on.
-            if self.block_dangerous and is_dangerous_command(command):
-                return REASON_DESTRUCTIVE, command
+            if self.block_dangerous:
+                if verdict.tier == "confirm":
+                    return REASON_RULE, verdict.rule
+                if is_dangerous_command(command):
+                    return REASON_DESTRUCTIVE, command
+            if action == "launch_app":
+                return (REASON_CHANGES, "") if self.mode == MODE_ASK else (None, "")
             if command.strip() and command.strip() in self.always_allow:
                 return None, ""
             if self.mode == MODE_AUTO:
                 return None, ""
-            if self.auto_approve_readonly and is_readonly_command(command):
+            if self.auto_approve_readonly and verdict.tier == "safe":
                 return None, ""
             return REASON_COMMAND, command
 
@@ -1007,21 +1233,58 @@ class Agent:
         return None, ""
 
     def _chat_only(self, system: str, emit: EmitFn) -> str:
-        messages = [{"role": "system", "content": system}, *self._trim_history()]
+        messages = [{"role": "system", "content": system}, *self._trim_history(len(system))]
         try:
             # Goes through _call so chat mode gets the same live streaming and
             # thinking trail as the agent modes.
             reply = self._call(messages, emit).text
         except LLMError as exc:
             emit(AgentEvent("error", text=str(exc), ok=False))
+            self.history.append({"role": "assistant", "content": f"(error) {exc}"})
             return str(exc)
+        if self._cancel:
+            reply = reply.strip() or "⏹ Stopped."
         emit(AgentEvent("final", text=reply))
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
+    def _block_reason(self, action: str, args: dict) -> str:
+        """The BLOCKED rule this call breaks, or "" (see rules.py)."""
+        if action == "run_command":
+            return blocked_rule(str(args.get("command", "")), self.blocked_commands)
+        if action == "launch_app":
+            return launch_blocked(str(args.get("app", "")), str(args.get("args", "")),
+                                  self.blocked_commands)
+        return ""
+
+    def _feedback(self, result: ToolResult) -> str:
+        """A tool result as the model will read it, sized to the window."""
+        return clip_text(result.as_feedback(), self._observation_limit())
+
+    def _prepare_args(self, tool: str, args: dict | None) -> dict:
+        """Typed arguments, with relative paths anchored at the session's cwd.
+
+        A `cd` moves run_command; without this, `list_dir .` or `read_file
+        notes.txt` would quietly look in whatever directory the app was
+        launched from. Resolving before the approval check also means the
+        secrets guard sees the real path (`.ssh/id_rsa` from ~ included).
+        """
+        out = coerce_args(tool, args)
+        for key in self._PATH_ARGS:
+            value = out.get(key)
+            if isinstance(value, str) and value.strip():
+                path = value.strip()
+                if not path.startswith(("/", "~", "$")):
+                    out[key] = str(Path(self.cwd) / path)
+        if tool == "list_dir" and not out.get("path"):
+            out["path"] = self.cwd
+        if tool == "search_files" and not out.get("path"):
+            out["path"] = self.cwd
+        return out
+
     def _execute(self, tool: str, args: dict) -> ToolResult:
         spec = TOOLS[tool]
-        kwargs = dict(args)
+        kwargs = self._prepare_args(tool, args)
         if tool == "run_command":
             kwargs.setdefault("timeout", self.command_timeout)
             kwargs.setdefault("cwd", self.cwd)

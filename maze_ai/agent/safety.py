@@ -41,8 +41,16 @@ _DANGEROUS_RE = re.compile("|".join(_DANGEROUS_PATTERNS), re.IGNORECASE)
 
 
 def is_dangerous_command(command: str) -> bool:
-    """True if the command matches a known destructive pattern."""
-    return bool(_DANGEROUS_RE.search(command or ""))
+    """True if the command matches a known destructive pattern.
+
+    The full rule set lives in rules.py; anything it blocks or always
+    confirms counts as dangerous here too.
+    """
+    if _DANGEROUS_RE.search(command or ""):
+        return True
+    from .rules import blocked_rule, confirm_rule
+
+    return bool(blocked_rule(command) or confirm_rule(command))
 
 
 # ── read-only commands ────────────────────────────────────────────────────
@@ -100,6 +108,14 @@ _GIT_LIST_ONLY: dict[str, set[str]] = {
     "remote": {"-v", "--verbose"},
 }
 
+# `ip addr` lists, `ip addr add …` changes the network: only a bare listing,
+# optionally with `show`/`list` and a device, is read-only.
+_IP_LIST_ONLY = {"show", "list", "dev"}
+
+# Flags allowed in front of the subcommand because they only pick WHICH
+# manager to ask: `systemctl --user status x`.
+_SCOPE_FLAGS = {"systemctl": {"--user", "--system", "--no-pager"}}
+
 
 def _has_unsafe_flag(base: str, tokens: list[str]) -> bool:
     """True if a read-only command carries a flag that makes it write or run."""
@@ -117,9 +133,14 @@ def _has_unsafe_flag(base: str, tokens: list[str]) -> bool:
 _READONLY_SUBCMD: dict[str, set[str] | None] = {
     "git": {"status", "log", "diff", "branch", "show", "remote", "tag",
             "describe", "rev-parse", "ls-files", "blame"},
-    "pacman": {"-Q", "-Qi", "-Qs", "-Ql", "-Qe", "-Qm", "-Si", "-Ss", "-Sg", "-Sl"},
-    "systemctl": {"status", "list-units", "list-unit-files", "is-active",
-                  "is-enabled", "show", "cat"},
+    # -Fy/-Sy/-S/-R/-U are the writing ones; none of them is here.
+    "pacman": {"-Q", "-Qi", "-Qii", "-Qs", "-Ql", "-Qe", "-Qm", "-Qo", "-Qq",
+               "-Qqe", "-Qqm", "-Qdt", "-Qdtq", "-Qtd", "-Qtdq", "-Qu", "-Qqu",
+               "-Qk", "-Qkk", "-Si", "-Sii", "-Ss", "-Ssq", "-Sg", "-Sl",
+               "-F", "-Fl", "-Fx", "-Fq"},
+    "systemctl": {"status", "list-units", "list-unit-files", "list-timers",
+                  "is-active", "is-enabled", "is-failed", "show", "cat"},
+    "ip": {"a", "addr", "address", "r", "route", "l", "link", "n", "neigh"},
     "journalctl": None,
     "docker": {"ps", "images", "logs", "version", "info", "inspect"},
     "flatpak": {"list", "info"},
@@ -196,6 +217,9 @@ def is_readonly_command(command: str) -> bool:
             # `git -c core.pager=<command> log` through on the word "log" —
             # which runs that command through git's pager.
             rest = tokens[1:]
+            scope = _SCOPE_FLAGS.get(base, set())
+            while rest and rest[0] in scope:
+                rest = rest[1:]
             if rest and any(t.startswith("-") for t in rest[:1]):
                 # A flag BEFORE the subcommand is how these tools are told to
                 # load config or an alternate helper (`git -c`, `git
@@ -210,6 +234,15 @@ def is_readonly_command(command: str) -> bool:
                 if listing is not None:
                     after = rest[rest.index(subcmd) + 1:]
                     if any(t not in listing for t in after):
+                        return False
+                if base == "ip":
+                    after = rest[rest.index(subcmd) + 1:]
+                    # Words after it: show/list/dev and at most an interface
+                    # name — never an action like add/del/set/flush.
+                    names = [t for t in after if t not in _IP_LIST_ONLY]
+                    if len(names) > 1 or (names and not re.fullmatch(r"[\w.@-]+", names[0])) \
+                            or any(t in ("add", "del", "delete", "set", "flush", "change",
+                                         "replace", "append") for t in after):
                         return False
                 continue
         return False

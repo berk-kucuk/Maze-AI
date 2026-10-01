@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from maze_ai.agent.agent import OBS_CLOSE, OBS_OPEN, Agent, AgentEvent
+from maze_ai.agent.agent import OBS_CLOSE, OBS_OPEN, UNSKIPPABLE_REASONS, Agent, AgentEvent
 from maze_ai.config import MODE_ASK, MODE_AUTO, MODE_CHAT
 from maze_ai.llm.base import LLMBackend, LLMError
 
@@ -343,7 +343,7 @@ def test_an_allow_listed_command_is_still_stopped_when_destructive():
     rec = Recorder(approve=False)
     agent.run("clean up", rec.emit, rec.approve)
     assert rec.approvals, "a destructive command must ask even if allow-listed"
-    assert "destructive" in rec.approvals[0].reason
+    assert rec.approvals[0].reason in UNSKIPPABLE_REASONS
 
 
 def test_an_allow_listed_harmless_command_is_still_remembered():

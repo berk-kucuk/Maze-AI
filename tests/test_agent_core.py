@@ -73,10 +73,16 @@ def test_dangerous_detected(cmd):
 
 @pytest.mark.parametrize("cmd", [
     "ls -la", "git status", "cat f.txt", "echo hi",
-    "rm -r foo", "rm file.txt", "git rm --force x",
+    "rm file.txt", "git rm --force x",
 ])
 def test_dangerous_false_positives(cmd):
     assert not is_dangerous_command(cmd)
+
+
+def test_recursive_delete_is_now_always_confirmed():
+    # Policy (rules.py): a recursive `rm` skips the file tools' backups, so it
+    # always asks — the agent is pointed at delete_path, which keeps one.
+    assert is_dangerous_command("rm -r foo")
 
 
 @pytest.mark.parametrize("cmd", [

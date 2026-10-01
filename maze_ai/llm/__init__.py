@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..config import Config
+from ..style import temperature_for
 from .base import LLMBackend, LLMError
 from .gemini_backend import GeminiBackend
 from .ollama_backend import OllamaBackend
@@ -41,13 +42,20 @@ def resolve_ollama_model(config: Config) -> str | None:
     if current in installed or any(_base(m) == _base(current) for m in installed):
         return current
     # Prefer a model that can actually call tools — the agent is far more
-    # capable with one, and picking alphabetically would be a coin toss.
-    chosen = installed[0]
+    # capable with one — and, among those, the biggest that stays in VRAM:
+    # a model that spills onto the CPU answers several times slower.
+    # Picking alphabetically would be a coin toss.
+    fitting = backend.models_that_fit()
+    capable = []
     for name in installed:
         backend.model = name
         if backend.supports_native_tools:
-            chosen = name
-            break
+            capable.append(name)
+    chosen = (
+        next((name for name in fitting if name in capable), None)
+        or (capable[0] if capable else None)
+        or (fitting[0] if fitting else installed[0])
+    )
     backend.model = chosen
     config.set("ollama_model", chosen)
     config.save()
@@ -57,16 +65,19 @@ def resolve_ollama_model(config: Config) -> str | None:
 def build_backend(config: Config) -> LLMBackend:
     """Instantiate the backend selected in ``config``."""
     backend = config.get("backend")
+    temperature = temperature_for(config.get("creativity"))
     if backend == "gemini":
         return GeminiBackend(
             api_key=config.get("gemini_api_key"),
             model=config.get("gemini_model"),
+            temperature=temperature,
         )
     if backend == "openai":
         return OpenAIBackend(
             api_key=config.get("openai_api_key"),
             model=config.get("openai_model"),
             base_url=config.get("openai_base_url"),
+            temperature=temperature,
         )
     return OllamaBackend(
         host=config.get("ollama_host"),
@@ -75,4 +86,5 @@ def build_backend(config: Config) -> LLMBackend:
         keep_alive=config.get("ollama_keep_alive") or "30m",
         think=bool(config.get("ollama_think")),
         num_gpu=int(config.get("ollama_num_gpu") or 0),
+        temperature=temperature,
     )

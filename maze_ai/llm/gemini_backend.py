@@ -28,9 +28,17 @@ class GeminiBackend(LLMBackend):
     name = "gemini"
     supports_vision = True
 
-    def __init__(self, api_key: str = "", model: str = "gemini-2.5-flash") -> None:
+    def __init__(
+        self, api_key: str = "", model: str = "gemini-2.5-flash", temperature: float = 0.4
+    ) -> None:
         self.api_key = api_key or ""
         self.model = model or "gemini-2.5-flash"
+        self.temperature = float(temperature)
+
+    def _headers(self) -> dict:
+        # The key goes in a header, not the query string, so it never ends up
+        # in a proxy log or an exception message that quotes the URL.
+        return {"x-goog-api-key": self.api_key}
 
     # ── message conversion ───────────────────────────────────────────────
     @staticmethod
@@ -65,7 +73,7 @@ class GeminiBackend(LLMBackend):
         system, contents = self._to_gemini(messages)
         payload: dict = {
             "contents": contents,
-            "generationConfig": {"temperature": 0.4},
+            "generationConfig": {"temperature": self.temperature},
         }
         if system:
             payload["systemInstruction"] = system
@@ -73,7 +81,7 @@ class GeminiBackend(LLMBackend):
         url = f"{API_ROOT}/models/{self.model}:generateContent"
         try:
             resp = request_with_retry(
-                "POST", url, params={"key": self.api_key}, json=payload, timeout=600
+                "POST", url, headers=self._headers(), json=payload, timeout=600
             )
         except requests.RequestException as exc:
             raise LLMError(f"Could not reach the Gemini API ({exc}).") from exc
@@ -103,20 +111,27 @@ class GeminiBackend(LLMBackend):
         if not self.api_key:
             raise LLMError("No Gemini API key set. Add one in Settings.")
         system, contents = self._to_gemini(messages)
-        payload: dict = {"contents": contents, "generationConfig": {"temperature": 0.4}}
+        payload: dict = {
+            "contents": contents, "generationConfig": {"temperature": self.temperature},
+        }
         if system:
             payload["systemInstruction"] = system
 
         url = f"{API_ROOT}/models/{self.model}:streamGenerateContent"
         try:
             resp = request_with_retry(
-                "POST", url, params={"key": self.api_key, "alt": "sse"}, json=payload,
+                "POST", url, params={"alt": "sse"}, headers=self._headers(), json=payload,
                 stream=True, timeout=(10, 600),
             )
         except requests.RequestException as exc:
             raise LLMError(f"Could not reach the Gemini API ({exc}).") from exc
         self._raise_for_status(resp)
 
+        with resp:
+            yield from self._sse_chunks(resp)
+
+    @staticmethod
+    def _sse_chunks(resp) -> Iterator[str]:
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
@@ -125,6 +140,8 @@ class GeminiBackend(LLMBackend):
                 obj = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            if obj.get("error"):
+                raise LLMError(f"Gemini error: {obj['error'].get('message', obj['error'])}")
             candidates = obj.get("candidates") or []
             if not candidates:
                 continue
@@ -138,7 +155,7 @@ class GeminiBackend(LLMBackend):
             return list(KNOWN_MODELS)
         try:
             resp = requests.get(
-                f"{API_ROOT}/models", params={"key": self.api_key}, timeout=5
+                f"{API_ROOT}/models", headers=self._headers(), timeout=5
             )
             resp.raise_for_status()
             names = []

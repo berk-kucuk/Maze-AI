@@ -77,12 +77,21 @@ DEFAULTS: dict[str, Any] = {
     "context_char_budget": 24000,     # cap on replayed history fed to the model
     "custom_instructions": "",        # extra persistent system guidance
     "stream_responses": True,         # stream tokens into the UI as they arrive
+    # Personality — how the assistant talks (see style.py)
+    "persona": "balanced",            # balanced | concise | detailed | friendly |
+    #                                   professional | hacker
+    "creativity": "balanced",         # precise | balanced | creative (temperature)
+    "no_emoji": True,                 # emoji → text emoticons such as :) :P :/
     # Safety
     "block_dangerous_commands": True,  # force approval for destructive commands
     "auto_approve_readonly": True,     # skip approval for safe read-only commands
     "always_allow": [],               # remembered per-command approvals (auto add)
     "guard_secrets": True,            # always confirm access to keys/tokens/history
     "confirm_network_egress": True,   # confirm fetches that carry data outwards
+    # The user's additions to the command rule set (agent/rules.py): one entry
+    # per line, a command prefix ("git push") or "re:<regex>".
+    "blocked_commands": [],           # never run, whatever the mode
+    "safe_commands": [],              # run without asking in Ask mode
     # UI
     "autostart": True,                # launch on login (into the tray)
     "start_hidden": False,            # start minimized to tray

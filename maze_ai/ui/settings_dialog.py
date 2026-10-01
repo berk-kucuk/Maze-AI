@@ -29,16 +29,17 @@ from PySide6.QtWidgets import (
 )
 
 from .. import autostart, desktop_integration
+from ..agent.rules import BLOCKED_RULES, CONFIRM_RULES, SAFE_SUMMARY, validate_user_pattern
 from ..agent.tools import TOOL_GROUPS, tool_schemas, tools_for_groups
 from ..config import LANGUAGES, MODE_ASK, MODE_AUTO, MODE_CHAT, Config
 from ..i18n import UI_LANGUAGES, tr
-from ..llm import GeminiBackend, OllamaBackend, OpenAIBackend
+from ..llm import GeminiBackend, OllamaBackend, OpenAIBackend, library
 from ..llm.gemini_backend import KNOWN_MODELS as GEMINI_MODELS
-from ..llm import library
 from ..llm.hardware import GB, describe_hardware, estimate_fit
 from ..llm.ollama_backend import short_size
 from ..llm.openai_backend import KNOWN_MODELS as OPENAI_MODELS
 from ..llm.openai_backend import PRESETS as OPENAI_PRESETS
+from ..style import CREATIVITY, PERSONAS
 from . import icons
 from .effects import AuroraCard
 from .richtext import harden_labels
@@ -229,6 +230,36 @@ class SettingsDialog(QDialog):
         lay.addLayout(row)
         form.addWidget(sec_agent)
 
+        # ── personality section ──────────────────────────────────────────
+        sec_persona, lay = _section(
+            "Personality", "How the assistant talks to you. Applies to every chat."
+        )
+        lay.addWidget(_label("STYLE"))
+        self.persona_box = NoWheelComboBox()
+        for pid, (label, _desc, _prompt) in PERSONAS.items():
+            self.persona_box.addItem(tr(label), pid)
+        self.persona_box.currentIndexChanged.connect(self._update_persona_desc)
+        lay.addWidget(self.persona_box)
+        self.persona_desc = QLabel("")
+        self.persona_desc.setWordWrap(True)
+        self.persona_desc.setStyleSheet(f"color: {TEXT_DIM}; font-size: 9pt;")
+        lay.addWidget(self.persona_desc)
+
+        lay.addSpacing(4)
+        lay.addWidget(_label("CREATIVITY"))
+        self.creativity_box = NoWheelComboBox()
+        for cid, (label, _temp) in CREATIVITY.items():
+            self.creativity_box.addItem(tr(label), cid)
+        lay.addWidget(self.creativity_box)
+
+        self.no_emoji_check = QCheckBox(tr("Use text emoticons like :) :P :/ instead of emoji"))
+        self.no_emoji_check.setToolTip(
+            tr("Emoji in answers are swapped for plain-text emoticons or removed, "
+               "even while the answer is still streaming.")
+        )
+        lay.addWidget(self.no_emoji_check)
+        form.addWidget(sec_persona)
+
         # ── advanced / behaviour section ─────────────────────────────────
         sec_adv, lay = _section(
             "Behaviour & safety", "Streaming, custom instructions and command guards."
@@ -307,6 +338,7 @@ class SettingsDialog(QDialog):
         self.custom_instructions.setFixedHeight(90)
         lay.addWidget(self.custom_instructions)
         form.addWidget(sec_adv)
+        form.addWidget(self._rules_section())
 
         # ── shortcuts & terminal ─────────────────────────────────────────
         sec_short, lay = _section(
@@ -433,6 +465,84 @@ class SettingsDialog(QDialog):
                   on_done=lambda _t, vram: setattr(self, "_lib_vram", int(vram or 0)))
 
     # ── file manager menus ───────────────────────────────────────────────
+    # ── command rules ────────────────────────────────────────────────────
+    def _rules_section(self) -> QFrame:
+        sec, lay = _section(
+            "Command rules",
+            "What the assistant may never run, must always ask about, and may run "
+            "without asking. Built-in rules can't be switched off; add your own below.",
+        )
+
+        def listing(labels: list[str]) -> QLabel:
+            text = QLabel("\n".join(f"•  {tr(label)}" for label in labels))
+            text.setWordWrap(True)
+            text.setStyleSheet(f"color: {TEXT_DIM}; font-size: 9pt;")
+            return text
+
+        def editor(placeholder: str) -> QPlainTextEdit:
+            box = QPlainTextEdit()
+            box.setPlaceholderText(tr(placeholder))
+            box.setFixedHeight(74)
+            return box
+
+        lay.addWidget(_label("NEVER RUN  ·  BLOCKED IN EVERY MODE"))
+        lay.addWidget(listing([rule.label for rule in BLOCKED_RULES]))
+        lay.addSpacing(4)
+        lay.addWidget(_label("ALWAYS ASK  ·  EVEN IN AUTONOMOUS MODE"))
+        lay.addWidget(listing([rule.label for rule in CONFIRM_RULES]))
+        lay.addSpacing(4)
+        lay.addWidget(_label("RUN WITHOUT ASKING  ·  IN ASK MODE"))
+        safe = QLabel(tr(SAFE_SUMMARY))
+        safe.setWordWrap(True)
+        safe.setStyleSheet(f"color: {TEXT_DIM}; font-size: 9pt;")
+        lay.addWidget(safe)
+
+        lay.addSpacing(6)
+        lay.addWidget(_label("YOUR BLOCKED COMMANDS"))
+        self.blocked_edit = editor(
+            "One per line: a command prefix, or re: and a regular expression.\n"
+            "git push\nre:^docker\\s+run"
+        )
+        lay.addWidget(self.blocked_edit)
+        lay.addWidget(_label("YOUR SAFE COMMANDS"))
+        self.safe_edit = editor(
+            "One per line, run without asking:\nmake test\nnpm run lint"
+        )
+        lay.addWidget(self.safe_edit)
+        note = QLabel(tr(
+            "Your safe commands still can't redirect output, use $(…) or touch "
+            "secrets, and never outrank a block or a confirmation."
+        ))
+        note.setObjectName("faint")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+
+        row = QHBoxLayout()
+        self.remembered_label = QLabel("")
+        self.remembered_label.setObjectName("faint")
+        row.addWidget(self.remembered_label, 1)
+        self.forget_btn = QPushButton(tr("Forget remembered approvals"))
+        self.forget_btn.clicked.connect(self._forget_approvals)
+        row.addWidget(self.forget_btn)
+        lay.addLayout(row)
+        self._forgotten = False
+        return sec
+
+    def _show_remembered(self) -> None:
+        count = 0 if self._forgotten else len(self.config.get("always_allow") or [])
+        self.remembered_label.setText(
+            tr("{count} command(s) you chose to always allow.").format(count=count)
+        )
+        self.forget_btn.setEnabled(count > 0)
+
+    def _forget_approvals(self) -> None:
+        self._forgotten = True
+        self._show_remembered()
+
+    @staticmethod
+    def _lines(box: QPlainTextEdit) -> list[str]:
+        return [line.strip() for line in box.toPlainText().splitlines() if line.strip()]
+
     def _install_menus(self) -> None:
         results = desktop_integration.install()
         if not results:
@@ -509,12 +619,14 @@ class SettingsDialog(QDialog):
         self.ollama_model.setEditable(True)
         self.ollama_model.currentTextChanged.connect(self._describe_ollama_model)
         mrow.addWidget(self.ollama_model, 1)
-        refresh = QPushButton("↻")
+        refresh = QPushButton()
+        refresh.setIcon(icons.icon("refresh", TEXT_DIM, 16, hover=TEXT))
         refresh.setFixedWidth(42)
         refresh.setToolTip(tr("List installed models"))
         refresh.clicked.connect(self._refresh_ollama_models)
         mrow.addWidget(refresh)
-        self.ollama_delete = QPushButton("🗑")
+        self.ollama_delete = QPushButton()
+        self.ollama_delete.setIcon(icons.icon("trash", TEXT_DIM, 16, hover="#ff6b6b"))
         self.ollama_delete.setFixedWidth(42)
         self.ollama_delete.setToolTip(tr("Delete this model from disk"))
         self.ollama_delete.clicked.connect(self._delete_ollama_model)
@@ -723,7 +835,8 @@ class SettingsDialog(QDialog):
         self.gemini_key.setPlaceholderText("AIza…")
         krow.addWidget(self.gemini_key, 1)
         self.reveal = QToolButton()
-        self.reveal.setText("👁")
+        self.reveal.setIcon(icons.icon("eye", TEXT_DIM, 16, hover=TEXT))
+        self.reveal.setToolTip(tr("Show or hide the key"))
         self.reveal.setCheckable(True)
         self.reveal.setFixedWidth(42)
         self.reveal.toggled.connect(
@@ -771,7 +884,8 @@ class SettingsDialog(QDialog):
         self.openai_key.setPlaceholderText("sk-…")
         krow.addWidget(self.openai_key, 1)
         reveal = QToolButton()
-        reveal.setText("👁")
+        reveal.setIcon(icons.icon("eye", TEXT_DIM, 16, hover=TEXT))
+        reveal.setToolTip(tr("Show or hide the key"))
         reveal.setCheckable(True)
         reveal.setFixedWidth(42)
         reveal.toggled.connect(
@@ -976,11 +1090,19 @@ class SettingsDialog(QDialog):
             # multi-gigabyte download — worth a deliberate second press.
             self._confirm_delete = name
             self.status.setText(
-                tr("Click 🗑 again to delete '{model}' from disk.").format(model=name)
+                tr("Click the delete button again to remove '{model}' from disk.").format(model=name)
             )
             return
         self._confirm_delete = ""
-        if self._ollama_backend(name).delete_model(name):
+        self.ollama_delete.setEnabled(False)
+        # Off the UI thread: deleting a big model can take Ollama a while.
+        self._run(self._ollama_backend(name).delete_model, name, token=name,
+                  on_done=self._on_model_deleted,
+                  on_fail=lambda token, _err: self._on_model_deleted(token, False))
+
+    def _on_model_deleted(self, name, ok) -> None:
+        self.ollama_delete.setEnabled(True)
+        if ok:
             self.status.setText(tr("Deleted '{model}'.").format(model=name))
             self._refresh_ollama_models()
         else:
@@ -1414,6 +1536,10 @@ class SettingsDialog(QDialog):
     def _update_mode_desc(self) -> None:
         self.mode_desc.setText(tr(self._MODE_DESC.get(self.mode_box.currentData(), "")))
 
+    def _update_persona_desc(self) -> None:
+        entry = PERSONAS.get(self.persona_box.currentData())
+        self.persona_desc.setText(tr(entry[1]) if entry else "")
+
     def _refresh_gemini_models(self) -> None:
         self.status.setText(tr("Querying Gemini…"))
         backend = GeminiBackend(self.gemini_key.text().strip())
@@ -1469,6 +1595,18 @@ class SettingsDialog(QDialog):
         self.guard_secrets_check.setChecked(bool(c.get("guard_secrets")))
         self.egress_check.setChecked(bool(c.get("confirm_network_egress")))
         self.custom_instructions.setPlainText(c.get("custom_instructions") or "")
+        persona_index = self.persona_box.findData(c.get("persona"))
+        self.persona_box.setCurrentIndex(max(0, persona_index))
+        self._update_persona_desc()
+        creativity_index = self.creativity_box.findData(c.get("creativity"))
+        self.creativity_box.setCurrentIndex(
+            creativity_index if creativity_index >= 0
+            else self.creativity_box.findData("balanced")
+        )
+        self.no_emoji_check.setChecked(bool(c.get("no_emoji")))
+        self.blocked_edit.setPlainText("\n".join(c.get("blocked_commands") or []))
+        self.safe_edit.setPlainText("\n".join(c.get("safe_commands") or []))
+        self._show_remembered()
 
         mode_index = {MODE_ASK: 0, MODE_AUTO: 1, MODE_CHAT: 2}.get(c.get("agent_mode"), 0)
         self.mode_box.setCurrentIndex(mode_index)
@@ -1488,7 +1626,18 @@ class SettingsDialog(QDialog):
         if self._pull_running():
             self.pull_status.setText(tr("Please wait for the download to finish…"))
             return
+        errors = [e for e in map(validate_user_pattern,
+                                 self._lines(self.blocked_edit) + self._lines(self.safe_edit))
+                  if e]
+        if errors:
+            self.status.setText(tr("Invalid rule: {error}").format(error=errors[0]))
+            self.blocked_edit.setFocus()
+            return
+        if self._forgotten:
+            self.config.set("always_allow", [])
         self.config.update({
+            "blocked_commands": self._lines(self.blocked_edit),
+            "safe_commands": self._lines(self.safe_edit),
             "backend": self.backend_box.currentData(),
             "ollama_host": self.ollama_host.text().strip() or "http://localhost:11434",
             "ollama_model": self.ollama_model.currentText().strip() or "llama3.1",
@@ -1520,6 +1669,9 @@ class SettingsDialog(QDialog):
             "guard_secrets": self.guard_secrets_check.isChecked(),
             "confirm_network_egress": self.egress_check.isChecked(),
             "custom_instructions": self.custom_instructions.toPlainText().strip(),
+            "persona": self.persona_box.currentData(),
+            "creativity": self.creativity_box.currentData(),
+            "no_emoji": self.no_emoji_check.isChecked(),
             "autostart": self.autostart_check.isChecked(),
             "close_to_tray": self.tray_check.isChecked(),
             "greet_on_start": self.greet_check.isChecked(),

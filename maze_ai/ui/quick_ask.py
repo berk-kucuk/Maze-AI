@@ -45,9 +45,9 @@ from PySide6.QtWidgets import (
 )
 
 from ..agent import Agent, AgentEvent, ApprovalRequest
+from ..agent.prompts import quote_block, strip_quoted
 from ..config import Config
-from ..i18n import tr
-from ..llm import build_backend
+from ..i18n import current_language, tr
 from . import icons
 from .approval import ApprovalDialog
 from .chat_view import ErrorCard, _Bubble
@@ -82,14 +82,35 @@ _BUTTON = 40            # the round send / stop button
 _WIDTH = 780
 
 # Prompt templates for the one-click actions on copied text, with their icon.
+# The instruction is translated into the interface language and the copied text
+# is fenced as pasted data: that way the answer comes in the user's language
+# (not the clipboard's), and a copied web page that says "ignore your
+# instructions" is read as text rather than obeyed.
 CLIPBOARD_ACTIONS: list[tuple[str, str]] = [
-    ("Explain", "Explain this clearly and briefly:\n\n{text}"),
-    ("Fix", "This failed or is wrong. Say what's wrong and give the corrected "
-            "version:\n\n{text}"),
-    ("Translate", "Translate this. If it is in English, translate to the user's "
-                  "language; otherwise translate to English:\n\n{text}"),
-    ("Summarise", "Summarise this in a few bullet points:\n\n{text}"),
+    ("Explain", "Explain the pasted text below clearly and briefly."),
+    ("Fix", "The pasted text below failed or is wrong. Say what is wrong and give "
+            "the corrected version."),
+    ("Translate", "Translate the pasted text below into {language}. If it is "
+                  "already in {language}, translate it into English instead."),
+    ("Summarise", "Summarise the pasted text below in a few bullet points."),
 ]
+
+_LANGUAGE_NAMES = {"tr": "Turkish", "en": "English", "de": "German", "fr": "French",
+                   "es": "Spanish", "it": "Italian", "pt": "Portuguese",
+                   "ru": "Russian", "ar": "Arabic", "zh": "Chinese", "ja": "Japanese"}
+
+
+def action_instruction(template: str, language: str = "") -> str:
+    """A clipboard action's instruction, in the interface language.
+
+    Only the instruction goes in the box; the copied text itself is attached
+    to the message at send time (see ``QuickAsk.send``), so the field stays
+    readable instead of filling up with the whole clipboard.
+    """
+    code = language if language and language != "auto" else current_language()
+    name = tr(_LANGUAGE_NAMES.get(code, "English"))
+    return tr(template).format(language=name)
+
 _ACTION_ICONS = {"Explain": "chat", "Fix": "edit", "Translate": "globe", "Summarise": "file"}
 
 
@@ -159,12 +180,21 @@ class _KeyHint(QPushButton):
         lay.addWidget(cap)
         lay.addWidget(self.caption)
         self.setFixedHeight(26)
-        self.setMinimumWidth(lay.sizeHint().width())
         self.setStyleSheet(
             "QPushButton#keyhint { background: transparent; border: none; border-radius: 7px;"
             "padding: 0; }"
             "QPushButton#keyhint:hover { background: rgba(255,255,255,0.06); }"
         )
+
+    # The keycap's padding comes from a style sheet applied after this widget
+    # is built, so a minimum width measured in __init__ was too small and the
+    # hints were clipped ("Ctrl+Sh", "E") once the footer filled up. Asking the
+    # layout every time keeps the measurement current.
+    def sizeHint(self):  # noqa: N802 - Qt override
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt override
+        return self.layout().sizeHint()
 
     def text(self) -> str:  # noqa: D401 - the caption is what the hint says
         return self.caption.text()
@@ -211,29 +241,12 @@ class _ActionChip(QPushButton):
 class QuickAsk(QDialog):
     """A one-shot question window that floats above everything else."""
 
-    open_in_chat = Signal(str, str)   # question, answer
+    open_in_chat = Signal(list)       # the whole Quick Ask conversation
 
     def __init__(self, config: Config, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.config = config
-        self.agent = Agent(
-            build_backend(config),
-            mode=config.get("agent_mode"),
-            max_steps=int(config.get("max_steps")),
-            command_timeout=int(config.get("command_timeout")),
-            language=config.get("output_language"),
-            custom_instructions=config.get("custom_instructions"),
-            context_char_budget=int(config.get("context_char_budget")),
-            stream_responses=bool(config.get("stream_responses")),
-            block_dangerous=bool(config.get("block_dangerous_commands")),
-            auto_approve_readonly=bool(config.get("auto_approve_readonly")),
-            always_allow=list(config.get("always_allow") or []),
-            guard_secrets=bool(config.get("guard_secrets")),
-            confirm_egress=bool(config.get("confirm_network_egress")),
-            native_tools=bool(config.get("native_tools")),
-            constrain_json=bool(config.get("constrain_json")),
-            tool_groups=list(config.get("tool_groups") or []),
-        )
+        self.agent = Agent.from_config(config)
         self.worker: AgentWorker | None = None
         self._grow: QPropertyAnimation | None = None
         self._fade: QPropertyAnimation | None = None
@@ -242,6 +255,10 @@ class QuickAsk(QDialog):
         self._pending = ""
         self._images: list[str] = []
         self._context_text = ""
+        #: The copied text still has to go out with the next question.
+        self._context_pending = False
+        #: Finished exchanges of this session, shown above the live answer.
+        self._turn_widgets: list[QWidget] = []
         self._last_question = ""
         self._action_buttons: list[QPushButton] = []
         # Tokens are revealed on a timer rather than the instant they arrive —
@@ -536,6 +553,7 @@ class QuickAsk(QDialog):
             self.set_status(tr("The clipboard is empty."))
             return False
         self._context_text = text
+        self._context_pending = True
         lines = text.splitlines()
         preview = "\n".join(line[:140] for line in lines[:3])
         if len(lines) > 3 or len(preview) > 360:
@@ -565,6 +583,7 @@ class QuickAsk(QDialog):
         paths = [p for p in paths if p]
         if not paths:
             return
+        self._context_text, self._context_pending = "", False
         first = Path(paths[0])
         vision = getattr(self.agent.backend, "supports_vision", False)
         images = [p for p in paths if Path(p).suffix.lower() in self.IMAGE_SUFFIXES]
@@ -602,6 +621,7 @@ class QuickAsk(QDialog):
 
     def attach_image(self, path: str) -> None:
         """Attach a screenshot (or any image) as the subject of the question."""
+        self._context_text, self._context_pending = "", False
         self._images = [path]
         self._show_context("image", tr("Screen capture"), Path(path).name)
         self._resize_to(self.width(), self._empty_height + 90)
@@ -623,7 +643,8 @@ class QuickAsk(QDialog):
             self._action_buttons.append(button)
             button.clicked.connect(
                 lambda _=False, tpl=template: self.prefill(
-                    tpl.format(text=text), send=True
+                    action_instruction(tpl, self.config.get("output_language")),
+                    send=True,
                 )
             )
             self.actions_row.addWidget(button)
@@ -722,26 +743,42 @@ class QuickAsk(QDialog):
         text = self.composer.toPlainText().strip()
         if not text:
             return
-        self._question = text
         self._last_question = text
+        if self._context_text and self._context_pending:
+            # The copied text rides along with whatever was asked about it —
+            # an action chip or the user's own words — fenced as pasted data.
+            # Before, a typed question about the clipboard went out without it.
+            text = f"{text}\n\n{quote_block(self._context_text)}"
+            self._context_pending = False
+        follow_up = bool(self._question)
+        if follow_up:
+            # Freeze the previous answer into the transcript, so this turn
+            # reads as a reply in the same conversation instead of replacing it.
+            self._freeze_answer()
+        self._question = text
         self._answer = ""
         self._pending = ""
         self._clear_error()
         self.answer.set_streaming_text("")
         self.answer.hide()
+        self._add_user_turn(self._last_question)
+        self.composer.clear()
         self.body.show()
         self.separator.show()
         self.answer_head.show()
         self.typing.show()
         self._set_activity(tr("Thinking…"))
-        # The answer area appears with the first words; until then the window
-        # is just the question and the "thinking" line.
-        self.answer_area.hide()
+        self.answer_area.show()
         self.copy_btn.hide()
         self.chat_btn.hide()
         self.actions_widget.hide()
-        # Just room for the "thinking" line; the window grows with the answer.
-        self._resize_to(self.width(), self._empty_height + 52, shrink=True)
+        if follow_up:
+            # Keep the conversation on screen; just make room for what's next.
+            QTimer.singleShot(0, self._follow_content)
+            QTimer.singleShot(0, self._scroll_to_end)
+        else:
+            # Just room for the question; the window grows with the answer.
+            self._resize_to(self.width(), self._empty_height + 120, shrink=True)
         self._frames = 0
         self._set_send_mode(busy=True)
         self.ask_hint.hide()
@@ -754,6 +791,51 @@ class QuickAsk(QDialog):
         self.worker.approval_needed.connect(self._on_approval)
         self.worker.done.connect(self._on_done)
         self.worker.start()
+
+    # ── the conversation transcript ──────────────────────────────────────
+    def _insert_turn(self, widget: QWidget) -> None:
+        """Put a finished message just above the live answer bubble."""
+        index = self._holder_lay.indexOf(self.answer)
+        self._holder_lay.insertWidget(index, widget)
+        self._turn_widgets.append(widget)
+
+    def _add_user_turn(self, text: str) -> None:
+        """The question as a chat bubble (the pasted text is on the card above)."""
+        shown = strip_quoted(text).strip() or text
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(60, 4, 0, 0)
+        lay.addStretch(1)
+        bubble = _Bubble(shown, user=True)
+        # A word-wrapped label asks for almost no width, so the bubble would
+        # wrap a short question onto three lines. Size it to its longest line,
+        # up to most of the window.
+        # Measure with the label's own font: its size comes from a style
+        # sheet, which only applies once polished.
+        bubble.ensurePolished()
+        bubble.label.ensurePolished()
+        longest = max((bubble.label.fontMetrics().horizontalAdvance(line)
+                       for line in shown.splitlines() or [shown]), default=0)
+        margins = bubble.layout().contentsMargins()
+        bubble.setMinimumWidth(min(int(self.width() * 0.75),
+                                   longest + margins.left() + margins.right() + 8))
+        lay.addWidget(bubble)
+        self._insert_turn(row)
+
+    def _freeze_answer(self) -> None:
+        """Copy the finished answer (or error) into the transcript."""
+        if self.error_card is not None:
+            card, self.error_card = self.error_card, None
+            self._holder_lay.removeWidget(card)
+            self._insert_turn(card)
+        if self._answer:
+            done = _Bubble(self._answer, user=False)
+            done.layout().setContentsMargins(0, 0, 0, 0)
+            self._insert_turn(done)
+
+    def _scroll_to_end(self) -> None:
+        bar = self.answer_area.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _reveal(self) -> None:
         """Show the next slice of queued text, so it reads as typing."""
@@ -791,10 +873,13 @@ class QuickAsk(QDialog):
         elif ev.kind == "error":
             self._clear_error()
             self.error_card = ErrorCard(ev.text)
-            self._holder_lay.insertWidget(0, self.error_card)
+            self._holder_lay.insertWidget(self._holder_lay.indexOf(self.answer),
+                                          self.error_card)
             self.answer_area.show()
         elif ev.kind == "tool_call":
             self._set_activity(tr("Running {tool}…").format(tool=ev.tool))
+        elif ev.kind == "blocked":
+            self._set_activity(tr("Blocked by the safety rules: {rule}").format(rule=tr(ev.text)))
         elif ev.kind in ("thought", "thinking"):
             tail = " ".join((ev.text or "").split())[:90]
             if tail:
@@ -831,7 +916,11 @@ class QuickAsk(QDialog):
         self.ask_hint.setVisible(not self._answer)
         self.copy_btn.setVisible(bool(self._answer))
         self.chat_btn.setVisible(bool(self._answer))
-        self.composer.selectAll()          # ready for the next question
+        # Ready for a reply in the same conversation.
+        self.composer.clear()
+        self.composer.setPlaceholderText(tr("Reply…"))
+        self.composer.setFocus()
+        QTimer.singleShot(0, self._scroll_to_end)
 
     # ── footer actions ───────────────────────────────────────────────────
     def _copy(self) -> None:
@@ -850,13 +939,49 @@ class QuickAsk(QDialog):
             pass
 
     def _to_chat(self) -> None:
-        self.open_in_chat.emit(self._question, self._answer)
+        """Hand the whole conversation to the main window as a saved chat."""
+        messages = [dict(m) for m in self.agent.history if m.get("content")]
+        if not messages and self._question:
+            messages = [{"role": "user", "content": self._question}]
+            if self._answer:
+                messages.append({"role": "assistant", "content": self._answer})
+        self.open_in_chat.emit(messages)
         self.close()
 
     # ── window behaviour ─────────────────────────────────────────────────
+    def reset(self) -> None:
+        """Back to an empty bar: no answer, no context, a new conversation."""
+        if self._busy():
+            return
+        self._reveal_timer.stop()
+        self.composer.clear()
+        self._question = self._answer = self._pending = ""
+        self._context_text = ""
+        self._context_pending = False
+        self._images = []
+        self._clear_error()
+        self.answer.set_streaming_text("")
+        for widget in self._turn_widgets:
+            self._holder_lay.removeWidget(widget)
+            widget.deleteLater()
+        self._turn_widgets = []
+        self.composer.setPlaceholderText(tr("Ask anything…"))
+        for widget in (self.body, self.separator, self.context_card, self.actions_widget,
+                       self.answer_head, self.answer_area, self.copy_btn,
+                       self.chat_btn):
+            widget.hide()
+        self.ask_hint.show()
+        self.set_status("")
+        self.agent.reset()
+        self.resize(self.width(), self._empty_height)
+
     def surface(self) -> None:
         """Show near the top of the screen, focused and ready to type."""
         was_visible = self.isVisible()
+        if not was_visible:
+            # Every summons starts a new conversation; inside one, the user
+            # can keep replying until the window is closed.
+            self.reset()
         screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
         if screen is not None and not was_visible:
             area = screen.availableGeometry()

@@ -160,7 +160,7 @@ class ApprovalDialog(QDialog):
         # Why we're asking. For safety-driven prompts this is the whole point:
         # an unexpected dialog should explain itself.
         if request.reason:
-            reason = tr(request.reason).format(detail=request.reason_detail)
+            reason = tr(request.reason).format(detail=tr(request.reason_detail))
             why = plain_label(tr("⚠  Asking because {reason}.").format(reason=reason))
             why.setWordWrap(True)
             color = DANGER if danger else WARN

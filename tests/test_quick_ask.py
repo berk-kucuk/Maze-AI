@@ -78,9 +78,22 @@ def test_continue_in_chat_emits_the_exchange(app, config):
     window._question = "q"
     window._answer = "a"
     seen = []
-    window.open_in_chat.connect(lambda q, a: seen.append((q, a)))
+    window.open_in_chat.connect(seen.append)
     window._to_chat()
-    assert seen == [("q", "a")]
+    assert seen == [[{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]]
+
+
+def test_continue_in_chat_carries_the_whole_conversation(app, config):
+    window = QuickAsk(config)
+    window._question, window._answer = "q2", "a2"
+    window.agent.history.extend([
+        {"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2"},
+    ])
+    seen = []
+    window.open_in_chat.connect(seen.append)
+    window._to_chat()
+    assert [m["content"] for m in seen[0]] == ["q1", "a1", "q2", "a2"]
 
 
 # ── dropping files on the composer ─────────────────────────────────────────

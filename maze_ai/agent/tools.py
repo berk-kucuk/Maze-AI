@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -45,7 +46,7 @@ __all__ = [
     "tool_schemas", "PROTOCOL_SCHEMA", "TOOL_GROUPS", "tools_for_groups",
     "is_dangerous_command", "is_readonly_command", "is_sensitive_path",
     "looks_like_exfiltration", "touches_sensitive_path", "check_url",
-    "set_reminder_store",
+    "set_reminder_store", "coerce_args", "clip_text",
 ]
 
 # Tools that change the system or run code. In "ask" mode these require the
@@ -131,7 +132,7 @@ class ToolSpec:
     side_effect: bool = field(default=False)
 
 
-def _clip(text: str) -> str:
+def clip_text(text: str, limit: int = MAX_OUTPUT) -> str:
     """Trim long output to fit the model's context — keeping BOTH ends.
 
     Head-only truncation loses exactly the part that usually matters: a build
@@ -140,16 +141,20 @@ def _clip(text: str) -> str:
     marker for what was dropped.
     """
     text = text or ""
-    if len(text) <= MAX_OUTPUT:
+    limit = max(200, int(limit))
+    if len(text) <= limit:
         return text
-    head = (MAX_OUTPUT * 2) // 3
-    tail = MAX_OUTPUT - head
-    dropped = len(text) - MAX_OUTPUT
+    head = (limit * 2) // 3
+    tail = limit - head
+    dropped = len(text) - limit
     return (
         text[:head]
         + f"\n\n… [{dropped} chars omitted from the middle] …\n\n"
         + text[-tail:]
     )
+
+
+_clip = clip_text
 
 
 def _expand(path: str) -> Path:
@@ -315,26 +320,81 @@ def run_command(command: str = "", timeout: int = 120, cwd: str = "", **_) -> To
     command = (command or "").strip()
     if not command:
         return ToolResult(False, "No command provided.")
+    # The agent checks the rule set before asking anyone; this is the second
+    # lock, for every other caller of the tool.
+    from .rules import blocked_rule
+
+    rule = blocked_rule(command)
+    if rule:
+        return ToolResult(False, f"Blocked by Maze AI's safety rules: {rule}.")
     workdir = Path.home()
     if cwd:
         candidate = _expand(cwd)
         if candidate.is_dir():
             workdir = candidate
     try:
-        proc = subprocess.run(
+        timeout = max(1, int(timeout))
+    except (TypeError, ValueError):
+        timeout = 120
+    env = dict(os.environ)
+    # Nothing here can answer a prompt or scroll a pager: make tools that would
+    # wait for one print and exit instead of hanging until the timeout.
+    env.update({"PAGER": "cat", "GIT_PAGER": "cat", "SYSTEMD_PAGER": "",
+                "GIT_TERMINAL_PROMPT": "0", "LESS": "-FRX"})
+    try:
+        # Its own session, so a timeout can kill everything the command
+        # started. subprocess.run only kills the shell: a grandchild still
+        # holding the output pipe (`sleep 999 &`, a dev server) would keep the
+        # call blocked forever after the "timeout".
+        proc = subprocess.Popen(
             command + _CWD_PROBE,
             shell=True,
-            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
+            errors="replace",
             cwd=str(workdir),
+            env=env,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return ToolResult(False, f"Command timed out after {timeout}s.")
     except Exception as exc:  # noqa: BLE001 - surface anything to the model
         return ToolResult(False, f"Failed to run command: {exc}")
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        partial = clip_text(((out or "") + (err or "")).strip(), 4000)
+        note = f"\nPartial output before it was stopped:\n{partial}" if partial else ""
+        return ToolResult(
+            False,
+            f"Command timed out after {timeout}s and was stopped. If it is meant "
+            f"to keep running (a server, a watcher), start it in the background "
+            f"with `nohup … &` and check on it separately.{note}",
+        )
+    return _command_result(proc.returncode, out or "", err or "", workdir)
 
-    stdout, ended_in = proc.stdout, ""
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Terminate a command and everything it spawned."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        try:
+            proc.wait(timeout=2)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _command_result(returncode: int, stdout: str, stderr: str, workdir: Path) -> ToolResult:
+    ended_in = ""
     if _CWD_MARKER in stdout:
         stdout, _, ended_in = stdout.rpartition(_CWD_MARKER)
         ended_in = ended_in.strip()
@@ -342,13 +402,18 @@ def run_command(command: str = "", timeout: int = 120, cwd: str = "", **_) -> To
     body = ""
     if stdout:
         body += stdout
-    if proc.stderr:
-        body += ("\n[stderr]\n" if body else "") + proc.stderr
+    if stderr:
+        body += ("\n[stderr]\n" if body else "") + stderr
     body = body.strip() or "(no output)"
-    ok = proc.returncode == 0
-    prefix = "" if ok else f"exit code {proc.returncode}\n"
+    ok = returncode == 0
+    prefix = "" if ok else f"exit code {returncode}\n"
     if ended_in and ended_in != str(workdir):
-        body += f"\n[working directory is now {ended_in}]"
+        # Kept visibly apart from the output: models quoted the old inline
+        # "[working directory is now …]" line back as if the program printed it.
+        body += (
+            f"\n\n(Note from Maze AI, not command output: the shell's working "
+            f"directory is now {ended_in})"
+        )
     return ToolResult(ok, _clip(prefix + body), cwd=ended_in)
 
 
@@ -356,6 +421,11 @@ def launch_app(app: str = "", args: str = "", **_) -> ToolResult:
     app = (app or "").strip()
     if not app:
         return ToolResult(False, "No application specified.")
+    from .rules import launch_blocked
+
+    rule = launch_blocked(app, args)
+    if rule:
+        return ToolResult(False, f"Blocked by Maze AI's safety rules: {rule}.")
     try:
         argv = [app] + (shlex.split(args) if args else [])
         subprocess.Popen(
@@ -390,6 +460,20 @@ def read_file(path: str = "", offset: int = 0, limit: int = 0, **_) -> ToolResul
         except (TypeError, ValueError):
             offset, limit = 0, 0
 
+        size = p.stat().st_size
+        with p.open("rb") as fh:
+            sample = fh.read(8192)
+        if b"\x00" in sample:
+            return ToolResult(
+                False,
+                f"{p} is a binary file ({size} bytes), not text. Inspect it with "
+                "run_command instead (e.g. `file`, `xxd | head`, `strings`).",
+            )
+        if size > MAX_READ_BYTES:
+            # Reading a multi-gigabyte log into memory to show 12 kB of it
+            # would stall the app; stream just the lines that are needed.
+            return _read_large(p, size, offset, limit)
+
         text = p.read_text(encoding="utf-8", errors="replace")
         if not offset and not limit:
             body = _clip(text)
@@ -416,6 +500,31 @@ def read_file(path: str = "", offset: int = 0, limit: int = 0, **_) -> ToolResul
         return ToolResult(False, f"Could not read file: {exc}")
 
 
+MAX_READ_BYTES = 20_000_000
+
+
+def _read_large(p: Path, size: int, offset: int, limit: int) -> ToolResult:
+    """Page through a file too big to load whole."""
+    start = max(1, offset or 1)
+    count = limit or 200
+    lines: list[str] = []
+    with p.open("r", encoding="utf-8", errors="replace") as fh:
+        for number, line in enumerate(fh, 1):
+            if number < start:
+                continue
+            if number >= start + count:
+                break
+            lines.append(line.rstrip("\n"))
+    if not lines:
+        return ToolResult(False, f"{p} has fewer than {start} lines.")
+    header = (
+        f"{p} · {size // 1_000_000} MB · lines {start}-{start + len(lines) - 1} "
+        "(file too large to read whole — use offset/limit to page, or "
+        "run_command with grep/tail to search it)\n"
+    )
+    return ToolResult(True, _clip(header + "\n".join(lines)))
+
+
 def write_file(path: str = "", content: str = "", **_) -> ToolResult:
     try:
         p = _expand(path)
@@ -435,11 +544,16 @@ def list_dir(path: str = ".", **_) -> ToolResult:
         if not p.is_dir():
             return ToolResult(False, f"Not a directory: {p}")
         entries = []
+        dirs = files = 0
         for child in sorted(p.iterdir()):
-            marker = "/" if child.is_dir() else ""
-            entries.append(child.name + marker)
+            is_dir = child.is_dir()
+            dirs += is_dir
+            files += not is_dir
+            entries.append(child.name + ("/" if is_dir else ""))
         listing = "\n".join(entries) or "(empty)"
-        return ToolResult(True, _clip(f"{p}:\n{listing}"))
+        # Small models miscount lists; say the numbers outright.
+        summary = f"[{dirs} director{'y' if dirs == 1 else 'ies'}, {files} file(s)]"
+        return ToolResult(True, _clip(f"{p}:\n{listing}\n{summary}"))
     except Exception as exc:  # noqa: BLE001
         return ToolResult(False, f"Could not list directory: {exc}")
 
@@ -706,7 +820,7 @@ def web_search(query: str = "", max_results: int = 5, **_) -> ToolResult:
         lines.append("")
     lines.append(
         "Next step: SYNTHESISE an answer for the user now — read the titles and "
-        "snippets above and write a direct final_answer that summarises the key "
+        "snippets above and write a direct answer that summarises the key "
         "findings in the user's language, citing the relevant sources (title + "
         "URL). Only call fetch_url on a result first if the snippets don't contain "
         "enough detail to answer. Do not stop without giving the user a summary."
@@ -772,12 +886,18 @@ def copy_path(src: str = "", dst: str = "", **_) -> ToolResult:
         s, d = _expand(src), _expand(dst)
         if not s.exists():
             return ToolResult(False, f"Source does not exist: {s}")
+        if d.is_dir() and not s.is_dir():
+            d = d / s.name           # `cp file dir/` semantics
+        # Copying over an existing file replaces it: keep the old one first.
+        note = _backup(d) if d.is_file() else ""
         d.parent.mkdir(parents=True, exist_ok=True)
         if s.is_dir():
             shutil.copytree(s, d, dirs_exist_ok=True)
         else:
             shutil.copy2(s, d)
-        return ToolResult(True, f"Copied {s} → {d}.")
+        return ToolResult(True, f"Copied {s} → {d}.{note}")
+    except TooLargeToBackUp as exc:
+        return ToolResult(False, f"Refusing to overwrite {dst}: {exc}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(False, f"Could not copy: {exc}")
 
@@ -883,11 +1003,19 @@ def search_files(path: str = ".", pattern: str = "", max_results: int = 50, **_)
         return ToolResult(False, f"No such path: {root}")
     _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".cache"}
     hits: list[str] = []
-    files = [root] if root.is_file() else root.rglob("*")
+    files = [root] if root.is_file() else _walk_files(root, _SKIP_DIRS)
+    deadline = time.monotonic() + SEARCH_SECONDS
+    timed_out = False
     for fp in files:
         if len(hits) >= max_results:
             break
-        if not fp.is_file() or any(part in _SKIP_DIRS for part in fp.parts):
+        if time.monotonic() > deadline:
+            timed_out = True
+            break
+        try:
+            if not fp.is_file() or fp.stat().st_size > SEARCH_MAX_FILE_BYTES:
+                continue
+        except OSError:
             continue
         try:
             with fp.open("r", encoding="utf-8", errors="strict") as fh:
@@ -898,10 +1026,32 @@ def search_files(path: str = ".", pattern: str = "", max_results: int = 50, **_)
                             break
         except (UnicodeDecodeError, OSError):
             continue  # skip binaries / unreadable files
+    stopped = (
+        f"\n[Stopped after {SEARCH_SECONDS}s — narrow the path to search the rest.]"
+        if timed_out else ""
+    )
     if not hits:
-        return ToolResult(True, f"No matches for /{pattern}/ under {root}.")
+        return ToolResult(True, f"No matches for /{pattern}/ under {root}.{stopped}")
     body = "\n".join(hits)
-    return ToolResult(True, _clip(f"{len(hits)} match(es) for /{pattern}/:\n{body}"))
+    return ToolResult(
+        True, _clip(f"{len(hits)} match(es) for /{pattern}/:\n{body}{stopped}")
+    )
+
+
+SEARCH_SECONDS = 20
+SEARCH_MAX_FILE_BYTES = 5_000_000
+
+
+def _walk_files(root: Path, skip: set[str]):
+    """Files under ``root``, never descending into skipped directories.
+
+    ``rglob`` walks into node_modules and .git first and filters afterwards,
+    which on a home directory means minutes of I/O for nothing.
+    """
+    for base, dirs, names in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in skip)
+        for name in sorted(names):
+            yield Path(base) / name
 
 
 # ── clipboard & screenshots ────────────────────────────────────────────────
@@ -1348,8 +1498,19 @@ def add_reminder(text: str = "", when: str = "", **_) -> ToolResult:
             f"Couldn't understand the time '{when}'. Try 'in 10 minutes', "
             "'18:30', 'tomorrow 09:00' or '2026-07-16 14:00'.",
         )
-    r = _reminders().add(text, due)
-    return ToolResult(True, f"Reminder set for {r.when_str()}: {text}")
+    _reminders().add(text, due)
+    return ToolResult(True, f"Reminder set for {_describe_due(due)}: {text}")
+
+
+def _describe_due(due: float) -> str:
+    """'tomorrow (Friday 2026-10-02) at 10:00' — spelled out, so a model can
+    repeat it without re-deriving (and garbling) the date."""
+    when = datetime.fromtimestamp(due)
+    today = datetime.now().date()
+    delta = (when.date() - today).days
+    relative = {0: "today", 1: "tomorrow"}.get(delta, f"in {delta} days" if delta > 1 else "")
+    stamp = f"{when:%A %Y-%m-%d} at {when:%H:%M}"
+    return f"{relative} ({stamp})" if relative else stamp
 
 
 def list_reminders(**_) -> ToolResult:
@@ -1380,8 +1541,9 @@ TOOLS: dict[str, ToolSpec] = {
     "run_command": ToolSpec(
         name="run_command",
         description="Run a shell command on the user's machine and read its output. "
-        "Use for inspecting the system, installing packages, git, etc. "
-        "Do NOT use sudo — ask the user to run privileged commands themselves.",
+        "Use for inspecting the system, package queries, git, builds, scripts. "
+        "Runs without a terminal: nothing can prompt for input. "
+        "Do NOT use sudo — give the user privileged commands to run themselves.",
         args={
             "command": "the shell command to execute",
             "cwd": "optional directory to run it in (the session's current "
@@ -1634,8 +1796,10 @@ TOOLS: dict[str, ToolSpec] = {
     "add_reminder": ToolSpec(
         name="add_reminder",
         description="Set a reminder / to-do that notifies the user at a given "
-        "time. Accepts times like 'in 10 minutes', '18:30', 'tomorrow 09:00' "
-        "or '2026-07-16 14:00'.",
+        "time. Accepts 'in 10 minutes', '1 hour 30 minutes', '18:30', '9pm', "
+        "'tomorrow 09:00', '2026-07-16 14:00' or '16.07.2026 14:00' (Turkish "
+        "forms like '30 dakika sonra', 'yarın 9:00', 'akşam 8' work too). "
+        "Pass the user's time expression as-is rather than computing a date.",
         args={"text": "what to remind about", "when": "when to remind"},
         run=add_reminder,
         example='{"action":"add_reminder","action_input":'
@@ -1699,6 +1863,43 @@ _SCHEMA_HINTS: dict[str, tuple[dict[str, str], tuple[str, ...]]] = {
     "list_reminders": ({}, ()),
     "remove_reminder": ({"which": "string"}, ("which",)),
 }
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on", "y")
+    return bool(value)
+
+
+def coerce_args(tool: str, args: dict | None) -> dict:
+    """Bring model-written arguments to the types the tool expects.
+
+    Models write ``"region": "false"`` or ``"count": "10"`` all the time, and
+    a non-empty string is truthy — so "false" used to *start* an interactive
+    area selection. Unknown keys and nulls are dropped rather than passed on.
+    """
+    types, _required = _SCHEMA_HINTS.get(tool, ({}, ()))
+    out: dict = {}
+    for key, value in (args or {}).items():
+        if value is None:
+            continue
+        kind = types.get(key)
+        if kind is None:
+            continue
+        try:
+            if kind == "boolean":
+                value = _as_bool(value)
+            elif kind == "integer":
+                value = int(float(value)) if not isinstance(value, bool) else int(value)
+            elif kind == "string" and not isinstance(value, str):
+                value = (
+                    json.dumps(value, ensure_ascii=False)
+                    if isinstance(value, (dict, list)) else str(value)
+                )
+        except (TypeError, ValueError):
+            continue        # leave it out; the tool's default applies
+        out[key] = value
+    return out
 
 
 # Tools grouped by what they touch, so a user on a small local model can turn

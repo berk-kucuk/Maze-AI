@@ -149,6 +149,69 @@ def kv_cache_bytes(context: int, per_token: int = _KV_BYTES_PER_TOKEN) -> int:
     return max(0, int(context)) * per_token
 
 
+def _int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def kv_bytes_per_token(model_info: dict) -> int:
+    """KV-cache bytes one token of context costs, from ``/api/show`` metadata.
+
+    The flat 40 kB guess is off by 3x either way: llama3.1-8b needs 128 kB a
+    token, while hybrid models (qwen3.5's linear attention, gemma's sliding
+    window) keep a full cache on only a handful of layers. Reading the
+    architecture is the difference between a context that fits and one that
+    spills the model onto the CPU. Assumes Ollama's default f16 cache, which
+    errs on the safe side if the server quantises it. Returns 0 when the
+    metadata is missing, so callers fall back to the generic estimate.
+    """
+    info = model_info or {}
+    arch = str(info.get("general.architecture") or "")
+    if not arch:
+        return 0
+
+    def key(name: str):
+        return info.get(f"{arch}.{name}")
+
+    layers = _int(key("block_count"))
+    heads = _int(key("attention.head_count"))
+    kv_heads_raw = key("attention.head_count_kv")
+    embedding = _int(key("embedding_length"))
+    if not layers:
+        return 0
+    head_dim = (embedding // heads) if heads and embedding else 0
+    k_len = _int(key("attention.key_length")) or head_dim
+    v_len = _int(key("attention.value_length")) or head_dim
+    if not (k_len and v_len):
+        return 0
+
+    # Layers that keep their own full-length cache.
+    own = layers - _int(key("attention.shared_kv_layers"))
+    full_layers = list(range(max(0, own)))
+    interval = _int(key("full_attention_interval"))
+    if interval > 1:
+        # Hybrid recurrent models: one attention layer every `interval`; the
+        # rest carry a fixed-size state that doesn't grow with the context.
+        full_layers = [i for i in full_layers if (i + 1) % interval == 0]
+    pattern = key("attention.sliding_window_pattern")
+    if isinstance(pattern, list) and pattern and key("attention.sliding_window"):
+        # True marks a sliding-window layer, whose cache is capped at the
+        # window and so doesn't grow with the context either.
+        full_layers = [i for i in full_layers if i < len(pattern) and not pattern[i]]
+
+    if isinstance(kv_heads_raw, list):
+        kv_per_layer = [_int(v) for v in kv_heads_raw]
+    else:
+        kv_per_layer = [_int(kv_heads_raw) or heads] * layers
+    total = 0
+    for i in full_layers:
+        kv = kv_per_layer[i] if i < len(kv_per_layer) else (kv_per_layer[-1] if kv_per_layer else 0)
+        total += kv * (k_len + v_len) * 2      # f16: two bytes per value
+    return total
+
+
 def estimate_need(weights_bytes: int, context: int, per_token: int | None = None) -> int:
     """Roughly how much memory a model needs at a given context size."""
     per_token = per_token or _KV_BYTES_PER_TOKEN

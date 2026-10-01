@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -16,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..i18n import tr
+from ..i18n import current_language, tr
 from ..reminders import ReminderStore, parse_when
 from . import icons
 from .effects import AuroraCard
@@ -69,8 +71,9 @@ class RemindersDialog(QDialog):
         add_row.addWidget(self.text_in, 1)
         self.when_in = QLineEdit()
         self.when_in.setPlaceholderText(tr("in 30 minutes"))
-        self.when_in.setFixedWidth(130)
+        self.when_in.setFixedWidth(180)
         self.when_in.returnPressed.connect(self._add)
+        self.when_in.textChanged.connect(self._preview_when)
         add_row.addWidget(self.when_in)
         add_btn = QPushButton(tr("Add"))
         add_btn.setObjectName("primary")
@@ -134,7 +137,21 @@ class RemindersDialog(QDialog):
             self._list.insertWidget(0, empty)
             return
         for r in pending:
-            self._list.insertWidget(self._list.count() - 1, self._row(r.id, r.text, r.when_str()))
+            self._list.insertWidget(
+                self._list.count() - 1, self._row(r.id, r.text, friendly_when(r.due))
+            )
+
+    def _preview_when(self, text: str) -> None:
+        """Say what the typed time means before it is saved: "→ Tomorrow 10:00"."""
+        text = text.strip()
+        if not text:
+            self.hint.setText("")
+            return
+        due = parse_when(text)
+        self.hint.setText(
+            "→ " + friendly_when(due) if due is not None
+            else tr("Couldn't read the time yet…")
+        )
 
     def _row(self, rid: str, text: str, when: str) -> QFrame:
         row = QFrame()
@@ -152,7 +169,7 @@ class RemindersDialog(QDialog):
         t.setWordWrap(True)
         t.setStyleSheet(f"color: {TEXT}; background: transparent; font-size: 10pt;")
         col.addWidget(t)
-        w = plain_label(f"⏰ {when}")
+        w = plain_label(when)
         w.setStyleSheet(f"color: {TEXT_DIM}; background: transparent; font-size: 8.5pt;")
         col.addWidget(w)
         h.addLayout(col, 1)
@@ -175,3 +192,17 @@ class RemindersDialog(QDialog):
     def _remove(self, rid: str) -> None:
         self.store.remove(rid)
         self._reload()
+
+
+def friendly_when(due: float, now: datetime | None = None) -> str:
+    """'Today 20:00', 'Tomorrow 10:00', or the date in the interface's format."""
+    when = datetime.fromtimestamp(due)
+    today = (now or datetime.now()).date()
+    clock = f"{when:%H:%M}"
+    days = (when.date() - today).days
+    if days == 0:
+        return tr("Today {time}").format(time=clock)
+    if days == 1:
+        return tr("Tomorrow {time}").format(time=clock)
+    date = f"{when:%d.%m.%Y}" if current_language() == "tr" else f"{when:%Y-%m-%d}"
+    return f"{date} {clock}"

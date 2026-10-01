@@ -152,7 +152,8 @@ TURKISH: dict[str, str] = {
     "Open Maze AI": "Maze AI'ı aç",
     "Quit": "Çıkış",
     "Still running in the tray.": "Sistem tepsisinde çalışmaya devam ediyor.",
-    "⏰ Reminder": "⏰ Hatırlatma",
+    "Reminder": "Hatırlatma",
+    "Show or hide the key": "Anahtarı göster/gizle",
     # ── approval dialog ───────────────────────────────────────────────────
     "Run this command?": "Bu komut çalıştırılsın mı?",
     "Launch this application?": "Bu uygulama açılsın mı?",
@@ -387,8 +388,8 @@ TURKISH: dict[str, str] = {
         "Sığacak kurulu modeller: {models}",
     "context {used}/{limit}": "bağlam {used}/{limit}",
     "In memory now: {models}": "Şu an bellekte: {models}",
-    "Click 🗑 again to delete '{model}' from disk.":
-        "'{model}' modelini diskten silmek için 🗑 düğmesine tekrar basın.",
+    "Click the delete button again to remove '{model}' from disk.":
+        "'{model}' modelini diskten silmek için sil düğmesine tekrar basın.",
     "Deleted '{model}'.": "'{model}' silindi.",
     "Could not delete '{model}'.": "'{model}' silinemedi.",
     "Querying Ollama…": "Ollama sorgulanıyor…",
@@ -570,6 +571,117 @@ TURKISH: dict[str, str] = {
     "Pick a model above, or type a tag": "Yukarıdan bir model seçin ya da etiket yazın",
     "'{model}' is not installed — pick one of yours or download it below.":
         "'{model}' kurulu değil — kurulu bir model seçin ya da aşağıdan indirin.",
+    # ── personality ───────────────────────────────────────────────────────
+    "Personality": "Kişilik",
+    "How the assistant talks to you. Applies to every chat.":
+        "Asistanın sizinle nasıl konuştuğu. Tüm sohbetlerde geçerlidir.",
+    "STYLE": "ÜSLUP",
+    "CREATIVITY": "YARATICILIK",
+    "Balanced": "Dengeli",
+    "Friendly and to the point. The default.": "Samimi ve öz. Varsayılan.",
+    "Concise": "Kısa ve öz",
+    "Short, direct answers. Commands and results first, little prose.":
+        "Kısa, doğrudan yanıtlar. Önce komut ve sonuç, az açıklama.",
+    "Detailed teacher": "Detaylı öğretmen",
+    "Explains the why behind every step. Good for learning.":
+        "Her adımın nedenini açıklar. Öğrenmek için ideal.",
+    "Friendly": "Samimi",
+    "Warm and casual, with a light sense of humour.":
+        "Sıcak ve rahat, hafif bir mizah anlayışıyla.",
+    "Professional": "Profesyonel",
+    "Formal, neutral and precise. No jokes, no emoticons.":
+        "Resmi, tarafsız ve net. Şaka ve ifade karakteri yok.",
+    "Witty hacker": "Esprili hacker",
+    "Dry, nerdy humour with terminal-veteran attitude.":
+        "Kuru, inek mizahı ve terminal emektarı tavrı.",
+    "Precise  ·  predictable, best for commands": "Kesin  ·  öngörülebilir, komutlar için en iyisi",
+    "Creative  ·  more varied wording and ideas": "Yaratıcı  ·  daha çeşitli ifade ve fikirler",
+    "Use text emoticons like :) :P :/ instead of emoji":
+        "Emoji yerine :) :P :/ gibi metin ifadeleri kullan",
+    "Emoji in answers are swapped for plain-text emoticons or removed, "
+    "even while the answer is still streaming.":
+        "Yanıtlardaki emojiler, yanıt akarken bile metin ifadelerine çevrilir "
+        "ya da kaldırılır.",
+    # ── clipboard actions (sent to the model) ─────────────────────────────
+    "Explain the pasted text below clearly and briefly.":
+        "Aşağıdaki yapıştırılan metni açık ve kısa bir şekilde açıkla.",
+    "The pasted text below failed or is wrong. Say what is wrong and give the "
+    "corrected version.":
+        "Aşağıdaki yapıştırılan metin hatalı ya da çalışmıyor. Sorunun ne olduğunu "
+        "söyle ve düzeltilmiş halini ver.",
+    "Translate the pasted text below into {language}. If it is already in "
+    "{language}, translate it into English instead.":
+        "Aşağıdaki yapıştırılan metni {language} diline çevir. Metin zaten "
+        "{language} ise İngilizceye çevir.",
+    "Summarise the pasted text below in a few bullet points.":
+        "Aşağıdaki yapıştırılan metni birkaç madde halinde özetle.",
+    "Reply…": "Yanıtla…",
+    "Today {time}": "Bugün {time}",
+    "Tomorrow {time}": "Yarın {time}",
+    "Couldn't read the time yet…": "Zaman henüz anlaşılamadı…",
+    "Turkish": "Türkçe", "English": "İngilizce", "German": "Almanca",
+    "French": "Fransızca", "Spanish": "İspanyolca", "Italian": "İtalyanca",
+    "Portuguese": "Portekizce", "Russian": "Rusça", "Arabic": "Arapça",
+    "Chinese": "Çince", "Japanese": "Japonca",
+    # ── command rules ─────────────────────────────────────────────────────
+    "Command rules": "Komut kuralları",
+    "What the assistant may never run, must always ask about, and may run "
+    "without asking. Built-in rules can't be switched off; add your own below.":
+        "Asistanın asla çalıştıramayacağı, her zaman soracağı ve sormadan "
+        "çalıştırabileceği komutlar. Yerleşik kurallar kapatılamaz; kendi "
+        "kurallarınızı aşağıya ekleyin.",
+    "NEVER RUN  ·  BLOCKED IN EVERY MODE": "ASLA ÇALIŞMAZ  ·  HER MODDA ENGELLİ",
+    "ALWAYS ASK  ·  EVEN IN AUTONOMOUS MODE": "HER ZAMAN SORAR  ·  OTONOM MODDA BİLE",
+    "RUN WITHOUT ASKING  ·  IN ASK MODE": "SORMADAN ÇALIŞIR  ·  SOR MODUNDA",
+    "YOUR BLOCKED COMMANDS": "SİZİN ENGELLEDİKLERİNİZ",
+    "YOUR SAFE COMMANDS": "SİZİN GÜVENLİ KOMUTLARINIZ",
+    "One per line: a command prefix, or re: and a regular expression.\n"
+    "git push\nre:^docker\\s+run":
+        "Her satıra bir tane: komutun başı ya da re: ile bir düzenli ifade.\n"
+        "git push\nre:^docker\\s+run",
+    "One per line, run without asking:\nmake test\nnpm run lint":
+        "Her satıra bir tane, sormadan çalışır:\nmake test\nnpm run lint",
+    "Your safe commands still can't redirect output, use $(…) or touch "
+    "secrets, and never outrank a block or a confirmation.":
+        "Güvenli komutlarınız da çıktıyı dosyaya yönlendiremez, $(…) kullanamaz, "
+        "gizli dosyalara dokunamaz ve hiçbir engeli ya da onayı geçersiz kılamaz.",
+    "Forget remembered approvals": "Hatırlanan onayları unut",
+    "{count} command(s) you chose to always allow.":
+        "Her zaman izin verdiğiniz {count} komut.",
+    "Invalid rule: {error}": "Geçersiz kural: {error}",
+    "Blocked by the safety rules: {rule}": "Güvenlik kurallarınca engellendi: {rule}",
+    "it matches the safety rule “{detail}”": "“{detail}” güvenlik kuralına uyuyor",
+    "ls, cd, pwd, cat, head, tail, grep, rg, find, tree, stat, file, wc, du, df, "
+    "free, uptime, ps, lscpu, lsblk, lspci, ip a, git status/log/diff/show, "
+    "pacman -Q…/-Si/-Ss, systemctl status, journalctl, --version of common tools":
+        "ls, cd, pwd, cat, head, tail, grep, rg, find, tree, stat, file, wc, du, "
+        "df, free, uptime, ps, lscpu, lsblk, lspci, ip a, git status/log/diff/show, "
+        "pacman -Q…/-Si/-Ss, systemctl status, journalctl, yaygın araçların --version çıktısı",
+    "Gaining root (sudo, su, doas, pkexec, run0)": "Root yetkisi almak (sudo, su, doas, pkexec, run0)",
+    "Deleting the whole system or home folder": "Tüm sistemi ya da ev klasörünü silmek",
+    "Moving the system or home folder away": "Sistemi ya da ev klasörünü başka yere taşımak",
+    "Mass-deleting from / or the home folder with find": "find ile / ya da ev klasöründen toplu silme",
+    "Formatting, partitioning or overwriting a disk": "Diski biçimlendirmek, bölümlemek ya da üzerine yazmak",
+    "Fork bombs": "Fork bombaları",
+    "Running a downloaded script straight in a shell": "İndirilen betiği doğrudan kabukta çalıştırmak",
+    "Opening a remote shell (reverse shells, nc -e)": "Uzak kabuk açmak (reverse shell, nc -e)",
+    "Killing every process of the session": "Oturumdaki tüm süreçleri öldürmek",
+    "Changing permissions or owner of everything under / or home":
+        "/ ya da ev klasöründeki her şeyin izin veya sahibini değiştirmek",
+    "Recursive or forced delete": "Özyinelemeli ya da zorla silme",
+    "Deleting with a wildcard": "Joker karakterle silme",
+    "Deleting files with find": "find ile dosya silme",
+    "Shredding or truncating files": "Dosyaları kalıcı imha etmek ya da boşaltmak",
+    "Discarding work or rewriting history in git": "git'te çalışmayı silmek ya da geçmişi yeniden yazmak",
+    "Stopping processes": "Süreçleri durdurmak",
+    "Stopping or disabling services": "Servisleri durdurmak ya da devre dışı bırakmak",
+    "Shutting down, rebooting or logging out": "Kapatmak, yeniden başlatmak ya da oturumu kapatmak",
+    "Recursive permission or owner changes": "Özyinelemeli izin ya da sahip değişikliği",
+    "Replacing or removing scheduled jobs": "Zamanlanmış görevleri değiştirmek ya da silmek",
+    "Uninstalling software or deleting models and containers":
+        "Yazılım kaldırmak ya da model ve konteyner silmek",
+    "Removing users or groups": "Kullanıcı ya da grup silmek",
+    "Moving files into /dev/null": "Dosyaları /dev/null içine taşımak",
 }
 
 _CATALOGS: dict[str, dict[str, str]] = {"tr": TURKISH}
