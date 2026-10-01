@@ -153,19 +153,6 @@ def test_answer_labels_do_not_open_links_by_themselves(app):
     assert labels and not any(lab.openExternalLinks() for lab in labels)
 
 
-def test_reminder_text_is_plain(app, tmp_path, monkeypatch):
-    from maze_ai import reminders as rem
-    from maze_ai.ui.reminders_dialog import RemindersDialog
-
-    monkeypatch.setattr(rem, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(rem, "REMINDERS_FILE", tmp_path / "r.json")
-    store = rem.ReminderStore()
-    store.add("<b>pay</b> rent", 4102444800.0)
-    dialog = RemindersDialog(store)
-    texts = [lab for lab in dialog.findChildren(QLabel) if "pay" in lab.text()]
-    assert texts and all(lab.textFormat() == Qt.TextFormat.PlainText for lab in texts)
-
-
 # ── data at rest ──────────────────────────────────────────────────────────
 def _mode(path) -> int:
     return stat.S_IMODE(os.stat(path).st_mode)
@@ -204,15 +191,6 @@ def test_conversation_ids_cannot_become_paths(tmp_path, monkeypatch, bad):
     store = history.ChatStore()
     assert store.load(bad) is None
     store.delete(bad)                     # must not raise or touch anything
-
-
-def test_reminders_are_owner_only(tmp_path, monkeypatch):
-    from maze_ai import reminders as rem
-
-    monkeypatch.setattr(rem, "DATA_DIR", tmp_path / "d")
-    monkeypatch.setattr(rem, "REMINDERS_FILE", tmp_path / "d" / "reminders.json")
-    rem.ReminderStore().add("x", 4102444800.0)
-    assert _mode(tmp_path / "d" / "reminders.json") == 0o600
 
 
 def test_write_private_never_follows_a_planted_symlink(tmp_path):

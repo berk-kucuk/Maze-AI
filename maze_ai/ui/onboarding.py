@@ -55,8 +55,8 @@ class OnboardingDialog(QDialog):
 
         body = QLabel(tr(
             "Your private, agentic assistant for Maze Linux. It can run commands, "
-            "manage files, launch apps, search the web, take screenshots and set "
-            "reminders — right from this window.\n\n"
+            "manage files, launch apps, search the web, read the screen and chat "
+            "with your folders — right from this window.\n\n"
             "First, choose where the model runs:\n"
             "• **Ollama** — fully local & private (download a model)\n"
             "• **Gemini** or an **OpenAI-compatible** API — hosted, just add a key\n\n"

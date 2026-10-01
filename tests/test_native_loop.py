@@ -91,7 +91,7 @@ def test_tool_call_then_answer(tmp_path):
     # The result went back as a tool message, fenced as untrusted data.
     tool_msg = agent.backend.calls[1]["messages"][-1]
     assert tool_msg["role"] == "tool" and tool_msg["tool_name"] == "read_file"
-    assert "untrusted DATA" in tool_msg["content"]
+    assert "not instructions" in tool_msg["content"]
 
 
 def test_tool_definitions_are_sent(tmp_path):
@@ -205,9 +205,9 @@ def test_calling_a_disabled_tool_is_refused(tmp_path):
 
 
 def test_every_tool_belongs_to_exactly_one_group():
-    from maze_ai.agent.tools import TOOLS
+    from maze_ai.agent.tools import CONTEXT_TOOLS, TOOLS
 
-    seen: list[str] = []
+    seen: list[str] = list(CONTEXT_TOOLS)
     for names in TOOL_GROUPS.values():
         seen.extend(names)
     assert sorted(seen) == sorted(TOOLS)
@@ -228,3 +228,37 @@ def test_compact_schemas_are_smaller():
     full = len(json.dumps(tool_schemas()))
     compact = len(json.dumps(tool_schemas(compact=True)))
     assert compact < full
+
+
+def test_a_tool_call_written_as_text_gets_a_nudge(tmp_path):
+    target = tmp_path / "x.txt"
+    backend = NativeBackend([
+        LLMReply(text='<<<write_file path:x.txt content:"hi">>>'),
+        call("write_file", path=str(target), content="hi"),
+        LLMReply(text="Done."),
+    ])
+    agent = Agent(backend, mode=MODE_AUTO, stream_responses=False)
+    answer = agent.run("write it", lambda e: None, lambda r: True)
+    assert target.read_text() == "hi"
+    assert answer == "Done."
+    nudge = backend.calls[1]["messages"][-1]["content"]
+    assert "wrote a tool call as text" in nudge
+
+
+def test_invalid_tool_call_arguments_are_retried(tmp_path):
+    from maze_ai.llm.base import LLMError
+
+    target = tmp_path / "y.txt"
+
+    class Flaky(NativeBackend):
+        def chat_ex(self, messages, **kw):
+            if not self.calls:
+                self.calls.append({"messages": messages, "tools": kw.get("tools")})
+                raise LLMError('Ollama error 500: {"error":"llama-server returned invalid '
+                               'tool call arguments for \\"write_file\\""}')
+            return super().chat_ex(messages, **kw)
+
+    backend = Flaky([call("write_file", path=str(target), content="ok"), LLMReply(text="Done.")])
+    agent = Agent(backend, mode=MODE_AUTO, stream_responses=False)
+    assert agent.run("write", lambda e: None, lambda r: True) == "Done."
+    assert target.read_text() == "ok"

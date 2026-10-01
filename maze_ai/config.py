@@ -35,6 +35,9 @@ LANGUAGES: list[tuple[str, str]] = [
     ("ja", "日本語"),
 ]
 
+#: Tool groups introduced after 1.20; switched on once for existing configs.
+NEW_TOOL_GROUPS = ("docs", "memory")
+
 DEFAULTS: dict[str, Any] = {
     "backend": "ollama",              # "ollama" | "gemini" | "openai"
     "agent_mode": MODE_ASK,           # "chat" | "ask" | "auto"
@@ -63,7 +66,7 @@ DEFAULTS: dict[str, Any] = {
     #                                   have no native tool calling
     # Tool groups the agent may use. Trimming these shrinks the definition
     # block a local model has to carry in its context on every single turn.
-    "tool_groups": ["shell", "files", "web", "desktop", "reminders"],
+    "tool_groups": ["shell", "files", "web", "docs", "desktop", "memory"],
     # Gemini
     "gemini_api_key": "",
     "gemini_model": "gemini-2.5-flash",
@@ -82,6 +85,10 @@ DEFAULTS: dict[str, Any] = {
     #                                   professional | hacker
     "creativity": "balanced",         # precise | balanced | creative (temperature)
     "no_emoji": True,                 # emoji → text emoticons such as :) :P :/
+    "code_routing": True,             # coding questions → an installed coder model
+    "embed_model": "",                # embedding model for folder search ("" = auto)
+    "summarize_history": True,        # condense old turns of long chats instead
+    #                                   of silently dropping them
     # Safety
     "block_dangerous_commands": True,  # force approval for destructive commands
     "auto_approve_readonly": True,     # skip approval for safe read-only commands
@@ -90,6 +97,7 @@ DEFAULTS: dict[str, Any] = {
     "confirm_network_egress": True,   # confirm fetches that carry data outwards
     # The user's additions to the command rule set (agent/rules.py): one entry
     # per line, a command prefix ("git push") or "re:<regex>".
+    "tool_groups_offered": list(NEW_TOOL_GROUPS),
     "blocked_commands": [],           # never run, whatever the mode
     "safe_commands": [],              # run without asking in Ask mode
     # UI
@@ -118,6 +126,7 @@ class Config:
                 for key in DEFAULTS:
                     if key in raw:
                         self._data[key] = raw[key]
+                self._migrate(raw)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
 
@@ -149,6 +158,22 @@ class Config:
         # for anyone upgrading from a version that wrote it world-readable.
         os.chmod(tmp, 0o600)
         os.replace(tmp, CONFIG_FILE)
+
+    def _migrate(self, raw: dict) -> None:
+        """Turn on tool groups added after the user saved their choice.
+
+        ``tool_groups`` is a list of what is enabled, so a group that did not
+        exist when it was saved would otherwise stay off forever. Groups the
+        user has already been offered are remembered, so switching one off
+        later sticks.
+        """
+        offered = set(raw.get("tool_groups_offered") or ())
+        groups = list(self._data.get("tool_groups") or [])
+        for group in NEW_TOOL_GROUPS:
+            if group not in offered and group not in groups and "tool_groups" in raw:
+                groups.append(group)
+        self._data["tool_groups"] = groups
+        self._data["tool_groups_offered"] = sorted(offered | set(NEW_TOOL_GROUPS))
 
     # ── access ───────────────────────────────────────────────────────────
     def get(self, key: str, default: Any = None) -> Any:

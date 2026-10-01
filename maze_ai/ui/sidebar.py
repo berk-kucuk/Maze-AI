@@ -31,6 +31,16 @@ from .theme import BG, DANGER, LINE, LOGO_PATH, SIDEBAR, TEXT, TEXT_DIM, TEXT_FA
 SIDEBAR_WIDTH = 264
 
 
+# Turkish is often typed without its letters ("nasil", "sifre"); fold both the
+# query and the text so either spelling finds the chat.
+_FOLD = str.maketrans("ıİğĞşŞçÇöÖüÜâÂîÎûÛ", "iiggssccoouuaaiiuu")
+
+
+def fold(text: str) -> str:
+    """Lower-case and strip Turkish diacritics, for forgiving search."""
+    return (text or "").translate(_FOLD).lower()
+
+
 def _relative_time(ts: float) -> str:
     delta = max(0, int(time.time() - ts))
     if delta < 60:
@@ -331,7 +341,7 @@ class HistorySidebar(QWidget):
         self._rebuild()
 
     def _on_search(self, text: str) -> None:
-        self._filter = (text or "").strip().lower()
+        self._filter = fold((text or "").strip())
         self._rebuild()
 
     def focus_search(self) -> None:
@@ -357,10 +367,10 @@ class HistorySidebar(QWidget):
     def _matches(self, conv: Conversation) -> bool:
         if not self._filter:
             return True
-        if self._filter in conv.title.lower():
+        if self._filter in fold(conv.title):
             return True
         # Also search message bodies so users can find a chat by its content.
-        return any(self._filter in (m.get("content") or "").lower() for m in conv.messages)
+        return any(self._filter in fold(m.get("content") or "") for m in conv.messages)
 
     def _group_header(self, text: str) -> QLabel:
         header = plain_label(tr(text).upper())

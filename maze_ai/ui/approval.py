@@ -26,6 +26,8 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..agent import UNSKIPPABLE_REASONS, ApprovalRequest
+from ..agent.explain import explain_command
 from ..i18n import tr
 from . import icons
 from .dialogs import shortcut_text
@@ -52,6 +55,10 @@ from .theme import (
     TEXT_FAINT,
     WARN,
 )
+from .worker import CallWorker
+
+#: Explanation lookups still running, kept alive past the dialog if need be.
+_EXPLAIN_WORKERS: set[CallWorker] = set()
 
 _TITLES = {
     "run_command": "Run this command?",
@@ -195,6 +202,45 @@ class ApprovalDialog(QDialog):
         self.detail = detail
         lay.addWidget(detail, 1)
 
+        # What the command does, part by part, from the installed manual pages
+        # (never from the model). Filled in off the UI thread.
+        self.explain_box: QFrame | None = None
+        command = self._command_text()
+        if command:
+            self.resize(660, 600)
+            box = QFrame()
+            box.setObjectName("explain")
+            box.setStyleSheet(
+                f"QFrame#explain {{ background: rgba(255,255,255,0.025);"
+                f"border: 1px solid {LINE}; border-radius: 10px; }}"
+            )
+            box_lay = QVBoxLayout(box)
+            box_lay.setContentsMargins(12, 9, 12, 10)
+            box_lay.setSpacing(5)
+            head_row = plain_label(tr("WHAT IT DOES  ·  from the manual pages on this computer"))
+            head_row.setStyleSheet(
+                f"color: {TEXT_FAINT}; font-size: 8pt; font-weight: 700; letter-spacing: 0.4px;"
+            )
+            box_lay.addWidget(head_row)
+            self.explain_grid = QGridLayout()
+            self.explain_grid.setHorizontalSpacing(12)
+            self.explain_grid.setVerticalSpacing(3)
+            box_lay.addLayout(self.explain_grid)
+            self.explain_status = plain_label(tr("Reading the manual…"))
+            self.explain_status.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 9pt;")
+            box_lay.addWidget(self.explain_status)
+            self.explain_box = box
+            lay.addWidget(box)
+            self._explain_serial = 0
+            self._explain_timer = QTimer(self)
+            self._explain_timer.setSingleShot(True)
+            self._explain_timer.setInterval(500)
+            self._explain_timer.timeout.connect(self._explain)
+            if self.editable:
+                # Edited by hand: explain what will actually run.
+                detail.textChanged.connect(self._explain_timer.start)
+            self._explain()
+
         hints = QHBoxLayout()
         hints.setSpacing(12)
         if self.editable:
@@ -273,6 +319,51 @@ class ApprovalDialog(QDialog):
         self.approve_btn.setEnabled(True)
         if self.always_btn is not None:
             self.always_btn.setEnabled(True)
+
+    # ── explanation ──────────────────────────────────────────────────────
+    def _command_text(self) -> str:
+        args = self.request.args
+        if self.request.tool == "run_command":
+            if getattr(self, "editable", False) and hasattr(self, "detail"):
+                return self.detail.toPlainText().strip()
+            return str(args.get("command", "")).strip()
+        if self.request.tool == "launch_app":
+            return f"{args.get('app', '')} {args.get('args', '')}".strip()
+        return ""
+
+    def _explain(self) -> None:
+        command = self._command_text()
+        self._explain_serial += 1
+        worker = CallWorker(explain_command, command, token=self._explain_serial)
+        worker.done.connect(self._show_explanation)
+        _EXPLAIN_WORKERS.add(worker)
+        worker.finished.connect(lambda w=worker: _EXPLAIN_WORKERS.discard(w))
+        worker.start()
+
+    def _show_explanation(self, serial, parts) -> None:
+        if serial != self._explain_serial:
+            return              # an older command; the user has edited since
+        try:
+            while self.explain_grid.count():
+                item = self.explain_grid.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+        except RuntimeError:
+            return              # the dialog is already gone
+        for row, part in enumerate(parts):
+            name = plain_label(part.text)
+            name.setStyleSheet(f"color: {TEXT}; font-family: {_MONO}; font-size: 9pt;")
+            name.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            meaning = plain_label(part.meaning)
+            meaning.setWordWrap(True)
+            meaning.setStyleSheet(f"color: {TEXT_DIM}; font-size: 9pt;")
+            if part.source:
+                meaning.setToolTip(part.source)
+            self.explain_grid.addWidget(name, row, 0)
+            self.explain_grid.addWidget(meaning, row, 1)
+        self.explain_grid.setColumnStretch(1, 1)
+        self.explain_status.setVisible(not parts)
+        self.explain_status.setText(tr("No manual page explains this command."))
 
     def _approve_key(self) -> None:
         if self._armed:

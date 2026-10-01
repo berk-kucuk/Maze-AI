@@ -95,6 +95,10 @@ _PATHS: dict[str, str] = {
     "warning": (
         '<path d="M12 4l9 15.5H3z"/><path d="M12 10v4.5M12 17.2h.01"/>'
     ),
+    "folder": (
+        '<path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l1.8 2H19a1.5 1.5 0 0 1 1.5 1.5V17'
+        'a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 17z"/>'
+    ),
     "eye": (
         '<path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5'
         'S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>'
@@ -108,6 +112,20 @@ _PATHS: dict[str, str] = {
         '<path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'
     ),
 }
+
+
+def app_icon() -> QIcon:
+    """Maze AI's icon, with the simplified mark for the small sizes."""
+    from PySide6.QtCore import QSize
+
+    from .theme import LOGO_PATH, LOGO_SMALL_PATH
+
+    icon = QIcon()
+    for size in (16, 22, 24, 32):
+        icon.addFile(LOGO_SMALL_PATH, QSize(size, size))
+    for size in (48, 64, 128, 256, 512):
+        icon.addFile(LOGO_PATH, QSize(size, size))
+    return icon
 
 
 def names() -> list[str]:

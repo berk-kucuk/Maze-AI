@@ -1,0 +1,32 @@
+# Maze AI post-install notes. Packages can't install other packages from here,
+# so this only says what is worth adding for this machine.
+
+_gpu_hint() {
+    local gpu
+    gpu=$(cat /sys/class/drm/card*/device/vendor 2>/dev/null | sort -u)
+    case "$gpu" in
+        *0x10de*)
+            pacman -Q ollama-cuda >/dev/null 2>&1 ||
+                echo "  NVIDIA GPU found: install ollama-cuda so models run on it:  pacman -S ollama-cuda" ;;
+        *0x1002*)
+            pacman -Q ollama-rocm >/dev/null 2>&1 || pacman -Q ollama-vulkan >/dev/null 2>&1 ||
+                echo "  AMD GPU found: install ollama-rocm (or ollama-vulkan) so models run on it" ;;
+    esac
+}
+
+_service_hint() {
+    systemctl is-enabled ollama.service >/dev/null 2>&1 ||
+        echo "  Start Ollama at boot:  systemctl enable --now ollama"
+}
+
+post_install() {
+    echo ">> Maze AI is installed. Open it from the menu, or press Meta+M for Quick Ask."
+    _service_hint
+    _gpu_hint
+    echo "  Then pick or download a model in Maze AI → Settings (it recommends one for your GPU)."
+}
+
+post_upgrade() {
+    _service_hint
+    _gpu_hint
+}

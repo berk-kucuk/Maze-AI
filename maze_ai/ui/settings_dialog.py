@@ -39,6 +39,8 @@ from ..llm.hardware import GB, describe_hardware, estimate_fit
 from ..llm.ollama_backend import short_size
 from ..llm.openai_backend import KNOWN_MODELS as OPENAI_MODELS
 from ..llm.openai_backend import PRESETS as OPENAI_PRESETS
+from ..llm.recommend import recommend_both
+from ..memory import MemoryStore
 from ..style import CREATIVITY, PERSONAS
 from . import icons
 from .effects import AuroraCard
@@ -258,6 +260,32 @@ class SettingsDialog(QDialog):
                "even while the answer is still streaming.")
         )
         lay.addWidget(self.no_emoji_check)
+
+        lay.addSpacing(6)
+        lay.addWidget(_label("WHAT MAZE AI REMEMBERS ABOUT YOU"))
+        self.memory_edit = QPlainTextEdit()
+        self.memory_edit.setPlaceholderText(tr(
+            "Nothing yet. Say “remember that I use the fish shell” in a chat, or "
+            "write notes here — one per line."
+        ))
+        self.memory_edit.setFixedHeight(96)
+        lay.addWidget(self.memory_edit)
+        memory_hint = QLabel(tr(
+            "Added to every chat as background. Stored only on this computer; "
+            "passwords and keys are never saved."
+        ))
+        memory_hint.setObjectName("faint")
+        memory_hint.setWordWrap(True)
+        lay.addWidget(memory_hint)
+        self.summarize_check = QCheckBox(
+            tr("Summarise older messages in long chats instead of forgetting them")
+        )
+        self.summarize_check.setToolTip(tr(
+            "When a chat no longer fits in the model's context, the oldest messages "
+            "are condensed into a short summary. Costs one extra model call now and "
+            "then."
+        ))
+        lay.addWidget(self.summarize_check)
         form.addWidget(sec_persona)
 
         # ── advanced / behaviour section ─────────────────────────────────
@@ -291,6 +319,14 @@ class SettingsDialog(QDialog):
                "cannot produce truncated or fenced JSON.")
         )
         lay.addWidget(self.constrain_json_check)
+        self.code_routing_check = QCheckBox(
+            tr("Answer programming questions with an installed coding model")
+        )
+        self.code_routing_check.setToolTip(tr(
+            "When a coding model such as qwen2.5-coder is installed and fits your GPU, "
+            "it answers questions about code; everything else stays on your main model."
+        ))
+        lay.addWidget(self.code_routing_check)
         self.guard_secrets_check = QCheckBox(
             tr("Always confirm access to keys, tokens and private history")
         )
@@ -316,7 +352,8 @@ class SettingsDialog(QDialog):
             "files": "Reading and changing files",
             "web": "Web search and fetching pages",
             "desktop": "Screenshots, OCR, clipboard, notifications",
-            "reminders": "Reminders and to-dos",
+            "docs": "Arch Wiki and manual pages (checks facts before answering)",
+            "memory": "Remembering things about you across chats",
         }
         for group in TOOL_GROUPS:
             box = QCheckBox(tr(group_labels.get(group, group)))
@@ -543,6 +580,64 @@ class SettingsDialog(QDialog):
     def _lines(box: QPlainTextEdit) -> list[str]:
         return [line.strip() for line in box.toPlainText().splitlines() if line.strip()]
 
+    # ── recommended model ────────────────────────────────────────────────
+    def _on_recommendations(self, token, recs) -> None:
+        general, coder = recs
+        self._on_recommendation(token, general)
+        self._coder = coder
+        if coder is None:
+            self.coder_line.hide()
+            self.coder_btn.hide()
+            return
+        text = (tr("For programming: {model} is installed and used for coding questions.")
+                if coder.installed else
+                tr("For programming: {model} ({size} download) writes better code "
+                   "than a general model.")).format(model=coder.model,
+                                                     size=short_size(coder.size))
+        self.coder_line.setText(text)
+        self.coder_line.show()
+        self.coder_btn.setVisible(not coder.installed)
+
+    def _download_coder(self) -> None:
+        if self._coder is not None:
+            self.pull_box.setEditText(self._coder.model)
+            self._start_pull()
+
+    def _on_recommendation(self, _token, rec) -> None:
+        self._recommendation = rec
+        if rec is None:
+            self.recommend_line.hide()
+            self.recommend_btn.hide()
+            return
+        current = self.ollama_model.currentText().strip()
+        where = tr("fits entirely in your GPU") if rec.placement == "gpu" \
+            else tr("fast enough without a GPU")
+        if rec.model == current:
+            text = tr("✓ {model} is the best fit for this machine ({where}).")
+        elif rec.installed:
+            text = tr("Recommended for this machine: {model} — installed, {where}.")
+        else:
+            text = tr("Recommended for this machine: {model} ({size} download) — {where}.")
+        self.recommend_line.setText(
+            text.format(model=rec.model, where=where, size=short_size(rec.size))
+        )
+        self.recommend_line.show()
+        self.recommend_btn.setText(tr("Use it") if rec.installed else tr("Download"))
+        self.recommend_btn.setVisible(rec.model != current)
+
+    def _use_recommendation(self) -> None:
+        rec = self._recommendation
+        if rec is None:
+            return
+        if rec.installed:
+            self.ollama_model.setCurrentText(rec.model)
+            self.status.setText(tr("Selected {model}. Save to switch to it.").format(
+                model=rec.model))
+            self.recommend_btn.hide()
+            return
+        self.pull_box.setEditText(rec.model)
+        self._start_pull()
+
     def _install_menus(self) -> None:
         results = desktop_integration.install()
         if not results:
@@ -647,6 +742,34 @@ class SettingsDialog(QDialog):
         self.hardware_line.setWordWrap(True)
         self.hardware_line.setObjectName("faint")
         lay.addWidget(self.hardware_line)
+
+        # The model this machine runs best, worked out in the background.
+        rec_row = QHBoxLayout()
+        rec_row.setSpacing(8)
+        self.recommend_line = QLabel("")
+        self.recommend_line.setWordWrap(True)
+        self.recommend_line.setStyleSheet(f"color: {TEXT}; font-size: 9pt;")
+        rec_row.addWidget(self.recommend_line, 1)
+        self.recommend_btn = QPushButton("")
+        self.recommend_btn.clicked.connect(self._use_recommendation)
+        rec_row.addWidget(self.recommend_btn)
+        self._recommendation = None
+        self.recommend_line.hide()
+        self.recommend_btn.hide()
+        lay.addLayout(rec_row)
+        coder_row = QHBoxLayout()
+        coder_row.setSpacing(8)
+        self.coder_line = QLabel("")
+        self.coder_line.setWordWrap(True)
+        self.coder_line.setStyleSheet(f"color: {TEXT_DIM}; font-size: 9pt;")
+        coder_row.addWidget(self.coder_line, 1)
+        self.coder_btn = QPushButton(tr("Download"))
+        self.coder_btn.clicked.connect(self._download_coder)
+        coder_row.addWidget(self.coder_btn)
+        self._coder = None
+        self.coder_line.hide()
+        self.coder_btn.hide()
+        lay.addLayout(coder_row)
 
         self.fit_line = QLabel("")
         self.fit_line.setWordWrap(True)
@@ -1158,6 +1281,8 @@ class SettingsDialog(QDialog):
         self.ollama_model.blockSignals(False)
         self._describe_ollama_model()
         self._render_library()
+        backend = self._ollama_backend()
+        self._run(recommend_both, backend, on_done=self._on_recommendations)
         if models and current and current not in models and f"{current}:latest" not in models:
             self.status.setText(
                 tr("'{model}' is not installed — pick one of yours or download it below.")
@@ -1604,6 +1729,10 @@ class SettingsDialog(QDialog):
             else self.creativity_box.findData("balanced")
         )
         self.no_emoji_check.setChecked(bool(c.get("no_emoji")))
+        self.summarize_check.setChecked(bool(c.get("summarize_history")))
+        self.code_routing_check.setChecked(bool(c.get("code_routing")))
+        self._memory = MemoryStore()
+        self.memory_edit.setPlainText("\n".join(self._memory.texts()))
         self.blocked_edit.setPlainText("\n".join(c.get("blocked_commands") or []))
         self.safe_edit.setPlainText("\n".join(c.get("safe_commands") or []))
         self._show_remembered()
@@ -1632,6 +1761,13 @@ class SettingsDialog(QDialog):
         if errors:
             self.status.setText(tr("Invalid rule: {error}").format(error=errors[0]))
             self.blocked_edit.setFocus()
+            return
+        rejected = self._memory.replace_all(self._lines(self.memory_edit))
+        if rejected:
+            self.memory_edit.setPlainText("\n".join(self._memory.texts()))
+            self.status.setText(tr(
+                "Not saved to memory (too long, or looks like a secret): {notes}"
+            ).format(notes="; ".join(n[:40] for n in rejected)))
             return
         if self._forgotten:
             self.config.set("always_allow", [])
@@ -1672,6 +1808,8 @@ class SettingsDialog(QDialog):
             "persona": self.persona_box.currentData(),
             "creativity": self.creativity_box.currentData(),
             "no_emoji": self.no_emoji_check.isChecked(),
+            "summarize_history": self.summarize_check.isChecked(),
+            "code_routing": self.code_routing_check.isChecked(),
             "autostart": self.autostart_check.isChecked(),
             "close_to_tray": self.tray_check.isChecked(),
             "greet_on_start": self.greet_check.isChecked(),

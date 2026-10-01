@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from ..i18n import tr
-from .theme import LOGO_PATH
+from .icons import app_icon
 
 
 class Tray(QSystemTrayIcon):
     def __init__(self, window, app: QApplication) -> None:
-        super().__init__(QIcon(LOGO_PATH), app)
+        super().__init__(app_icon(), app)
         self.window = window
         self.setToolTip("Maze AI")
 
@@ -62,4 +62,4 @@ class Tray(QSystemTrayIcon):
         self.window.open_settings()
 
     def notify(self, title: str, message: str) -> None:
-        self.showMessage(title, message, QIcon(LOGO_PATH), 4000)
+        self.showMessage(title, message, app_icon(), 4000)

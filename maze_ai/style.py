@@ -201,8 +201,9 @@ class EmojiFilter:
             self._dropped = True
             return
         self._dropped = True
-        # "## 🚀 Title" and "- ✅ done" would keep a double space otherwise.
-        self._eat_space = self._last in " \n\t"
+        # "## 🚀 Title" and "- ✅ done" would keep a double space otherwise, and
+        # "**⚠️ Note**" would become "** Note**", which no longer renders bold.
+        self._eat_space = self._last in " \n\t*_~`("
 
     def _step(self, ch: str, out: list[str]) -> None:
         if self._held:

@@ -27,7 +27,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 import requests
 
 from ..private import private_dir, write_private
-from ..reminders import ReminderStore, parse_when
 from .safety import (
     PROTECTED_PATHS,
     check_url,
@@ -46,7 +45,7 @@ __all__ = [
     "tool_schemas", "PROTOCOL_SCHEMA", "TOOL_GROUPS", "tools_for_groups",
     "is_dangerous_command", "is_readonly_command", "is_sensitive_path",
     "looks_like_exfiltration", "touches_sensitive_path", "check_url",
-    "set_reminder_store", "coerce_args", "clip_text",
+    "coerce_args", "clip_text", "set_memory_store", "memory_store",
 ]
 
 # Tools that change the system or run code. In "ask" mode these require the
@@ -87,22 +86,6 @@ EGRESS_TOOLS = {"fetch_url"}
 # Maximum bytes fetch_url will pull down before giving up — a model-chosen URL
 # must never be able to pull a multi-gigabyte file into memory.
 MAX_FETCH_BYTES = 5_000_000
-
-# Shared reminder store — the UI injects its instance so tool writes and the
-# UI's due-checker see the same data. Falls back to a lazily-created one.
-_REMINDER_STORE: ReminderStore | None = None
-
-
-def set_reminder_store(store: ReminderStore) -> None:
-    global _REMINDER_STORE
-    _REMINDER_STORE = store
-
-
-def _reminders() -> ReminderStore:
-    global _REMINDER_STORE
-    if _REMINDER_STORE is None:
-        _REMINDER_STORE = ReminderStore()
-    return _REMINDER_STORE
 
 MAX_OUTPUT = 12_000  # chars of command output fed back to the model
 
@@ -525,15 +508,38 @@ def _read_large(p: Path, size: int, offset: int, limit: int) -> ToolResult:
     return ToolResult(True, _clip(header + "\n".join(lines)))
 
 
+def _refuse_broken(p: Path, content: str) -> ToolResult | None:
+    """Don't save code that doesn't even parse; tell the model where it breaks."""
+    from .codecheck import validate_content
+
+    error = validate_content(p, content)
+    if error:
+        return ToolResult(False, f"Not saved — the new content of {p} doesn't parse. "
+                                 f"{error}\nFix it and write the file again.")
+    return None
+
+
+def _checked(p: Path) -> str:
+    from .codecheck import check_report
+
+    try:
+        return check_report(p)
+    except Exception:  # noqa: BLE001 - a linter problem must not fail the write
+        return ""
+
+
 def write_file(path: str = "", content: str = "", **_) -> ToolResult:
     try:
         p = _expand(path)
         if p.is_dir():
             return ToolResult(False, f"{p} is a directory.")
+        refused = _refuse_broken(p, content or "")
+        if refused:
+            return refused
         note = _backup(p)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content or "", encoding="utf-8")
-        return ToolResult(True, f"Wrote {len(content or '')} bytes to {p}.{note}")
+        return ToolResult(True, f"Wrote {len(content or '')} bytes to {p}.{note}{_checked(p)}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(False, f"Could not write file: {exc}")
 
@@ -768,21 +774,8 @@ class _DDGResults(HTMLParser):
         return self.results
 
 
-def web_search(query: str = "", max_results: int = 5, **_) -> ToolResult:
-    """Search the web via DuckDuckGo and return ranked title/URL/snippet results.
-
-    Far more reliable than guessing a search-engine URL and fetch_url-ing it: it
-    hits DDG's server-rendered HTML endpoints and parses the real result links.
-    """
-    query = (query or "").strip()
-    if not query:
-        return ToolResult(False, "No search query provided.")
-    try:
-        max_results = int(max_results)
-    except (TypeError, ValueError):
-        max_results = 5
-    max_results = max(1, min(max_results, 10))
-
+def ddg_results(query: str) -> tuple[list[dict], str]:
+    """DuckDuckGo results as ``[{title, url, snippet}]``, plus the last error."""
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
         "Accept-Language": "en-US,en;q=0.9",
@@ -807,7 +800,25 @@ def web_search(query: str = "", max_results: int = 5, **_) -> ToolResult:
         results = parser.finish()
         if results:
             break
+    return results, last_err
 
+
+def web_search(query: str = "", max_results: int = 5, **_) -> ToolResult:
+    """Search the web via DuckDuckGo and return ranked title/URL/snippet results.
+
+    Far more reliable than guessing a search-engine URL and fetch_url-ing it: it
+    hits DDG's server-rendered HTML endpoints and parses the real result links.
+    """
+    query = (query or "").strip()
+    if not query:
+        return ToolResult(False, "No search query provided.")
+    try:
+        max_results = int(max_results)
+    except (TypeError, ValueError):
+        max_results = 5
+    max_results = max(1, min(max_results, 10))
+
+    results, last_err = ddg_results(query)
     if not results:
         return ToolResult(False, f"No search results for '{query}' ({last_err}).")
 
@@ -942,29 +953,55 @@ def undo_file_change(path: str = "", **_) -> ToolResult:
 
 
 # ── targeted file editing ─────────────────────────────────────────────────
-def edit_file(path: str = "", old: str = "", new: str = "", all: bool = False, **_) -> ToolResult:
-    """Replace an exact substring in a file — cheaper/safer than a full rewrite."""
+def _apply_edit(text: str, old: str, new: str, every: bool, label: str) -> tuple[str, str, int]:
+    """(updated text, error, replacements) for one exact-text replacement."""
+    if not old:
+        return text, f"{label}: no 'old' text given to replace.", 0
+    occurrences = text.count(old)
+    if occurrences == 0:
+        return text, f"{label}: the 'old' text was not found in the file.", 0
+    if occurrences > 1 and not every:
+        return text, (f"{label}: 'old' appears {occurrences} times; pass all=true, or "
+                      "include more surrounding lines to make it unique."), 0
+    updated = text.replace(old, new) if every else text.replace(old, new, 1)
+    return updated, "", occurrences if every else 1
+
+
+def edit_file(path: str = "", old: str = "", new: str = "", all: bool = False,
+              edits: list | None = None, **_) -> ToolResult:
+    """Replace exact text in a file — one change, or several at once.
+
+    With ``edits`` (a list of {old, new, all?}) every change is applied in
+    memory first and the file is written only if all of them apply and the
+    result still parses: a half-applied refactor is worse than none.
+    """
     try:
         p = _expand(path)
         if not p.exists() or p.is_dir():
             return ToolResult(False, f"No such file: {p}")
-        if not old:
-            return ToolResult(False, "No 'old' text given to replace.")
         text = p.read_text(encoding="utf-8", errors="replace")
-        occurrences = text.count(old)
-        if occurrences == 0:
-            return ToolResult(False, "The 'old' text was not found in the file.")
-        if occurrences > 1 and not all:
-            return ToolResult(
-                False,
-                f"'old' appears {occurrences} times; pass all=true to replace every "
-                "occurrence, or include more surrounding context to make it unique.",
-            )
+        changes = list(edits or [])
+        if not changes:
+            changes = [{"old": old, "new": new, "all": all}]
+        updated, total = text, 0
+        for number, change in enumerate(changes, 1):
+            if not isinstance(change, dict):
+                return ToolResult(False, f"Edit {number} is not an object with old/new.")
+            label = f"Edit {number}" if len(changes) > 1 else "Edit"
+            updated, error, count = _apply_edit(
+                updated, str(change.get("old") or ""), str(change.get("new") or ""),
+                _as_bool(change.get("all")), label)
+            if error:
+                return ToolResult(False, f"{error} Nothing was changed in {p}.")
+            total += count
+        refused = _refuse_broken(p, updated)
+        if refused:
+            return refused
         note = _backup(p)
-        updated = text.replace(old, new) if all else text.replace(old, new, 1)
         p.write_text(updated, encoding="utf-8")
-        n = occurrences if all else 1
-        return ToolResult(True, f"Replaced {n} occurrence(s) in {p}.{note}")
+        return ToolResult(True, f"Replaced {total} occurrence(s) in {p}.{note}{_checked(p)}")
+    except TooLargeToBackUp as exc:
+        return ToolResult(False, f"Refusing to edit: {exc}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(False, f"Could not edit file: {exc}")
 
@@ -973,11 +1010,15 @@ def append_file(path: str = "", content: str = "", **_) -> ToolResult:
     """Append text to a file (creating it if needed)."""
     try:
         p = _expand(path)
+        current = p.read_text("utf-8", errors="replace") if p.is_file() else ""
+        refused = _refuse_broken(p, current + (content or ""))
+        if refused:
+            return refused
         note = _backup(p)
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as fh:
             fh.write(content or "")
-        return ToolResult(True, f"Appended {len(content or '')} bytes to {p}.{note}")
+        return ToolResult(True, f"Appended {len(content or '')} bytes to {p}.{note}{_checked(p)}")
     except TooLargeToBackUp as exc:
         return ToolResult(False, f"Refusing to append: {exc}")
     except Exception as exc:  # noqa: BLE001
@@ -1486,55 +1527,71 @@ def notify(title: str = "Maze AI", message: str = "", **_) -> ToolResult:
     return ToolResult(True, f"Notification sent: {message}")
 
 
-# ── reminders / to-do ────────────────────────────────────────────────────
-def add_reminder(text: str = "", when: str = "", **_) -> ToolResult:
-    text = (text or "").strip()
-    if not text:
-        return ToolResult(False, "No reminder text given.")
-    due = parse_when(when)
-    if due is None:
-        return ToolResult(
-            False,
-            f"Couldn't understand the time '{when}'. Try 'in 10 minutes', "
-            "'18:30', 'tomorrow 09:00' or '2026-07-16 14:00'.",
-        )
-    _reminders().add(text, due)
-    return ToolResult(True, f"Reminder set for {_describe_due(due)}: {text}")
+# ── memory ───────────────────────────────────────────────────────────────
+_MEMORY_STORE = None
 
 
-def _describe_due(due: float) -> str:
-    """'tomorrow (Friday 2026-10-02) at 10:00' — spelled out, so a model can
-    repeat it without re-deriving (and garbling) the date."""
-    when = datetime.fromtimestamp(due)
-    today = datetime.now().date()
-    delta = (when.date() - today).days
-    relative = {0: "today", 1: "tomorrow"}.get(delta, f"in {delta} days" if delta > 1 else "")
-    stamp = f"{when:%A %Y-%m-%d} at {when:%H:%M}"
-    return f"{relative} ({stamp})" if relative else stamp
+def set_memory_store(store) -> None:
+    global _MEMORY_STORE
+    _MEMORY_STORE = store
 
 
-def list_reminders(**_) -> ToolResult:
-    pending = _reminders().pending()
-    if not pending:
-        return ToolResult(True, "No pending reminders.")
-    lines = [f"- [{r.id}] {r.when_str()} — {r.text}" for r in pending]
-    return ToolResult(True, "Pending reminders:\n" + "\n".join(lines))
+def memory_store():
+    global _MEMORY_STORE
+    if _MEMORY_STORE is None:
+        from ..memory import MemoryStore
+
+        _MEMORY_STORE = MemoryStore()
+    return _MEMORY_STORE
 
 
-def remove_reminder(which: str = "", **_) -> ToolResult:
-    which = (which or "").strip()
-    store = _reminders()
-    if store.remove(which):
-        return ToolResult(True, f"Removed the reminder matching '{which}'.")
-    candidates = store.matches(which)
-    if len(candidates) > 1:
-        listed = "\n".join(f"- [{r.id}] {r.when_str()} — {r.text}" for r in candidates)
-        return ToolResult(
-            False,
-            f"'{which}' matches {len(candidates)} reminders — nothing was removed. "
-            f"Ask the user which one, or pass its id:\n{listed}",
-        )
-    return ToolResult(False, f"No reminder matched '{which}'.")
+def remember(text: str = "", **_) -> ToolResult:
+    store = memory_store()
+    store.load()          # the user may have edited notes in Settings
+    ok, message = store.add(text)
+    return ToolResult(ok, message)
+
+
+def forget(which: str = "", **_) -> ToolResult:
+    store = memory_store()
+    store.load()
+    ok, message = store.forget(which)
+    return ToolResult(ok, message)
+
+
+# ── documentation ────────────────────────────────────────────────────────
+def arch_wiki(query: str = "", page: str = "", **_) -> ToolResult:
+    from .docs import arch_wiki as _arch_wiki
+
+    ok, text = _arch_wiki(query=query, page=page)
+    return ToolResult(ok, text)
+
+
+def search_folder(query: str = "", **_) -> ToolResult:
+    # The agent answers this itself (it owns the index of the attached
+    # folder); reaching here means no folder is attached.
+    return ToolResult(False, "No folder is attached to this chat.")
+
+
+def python_doc(name: str = "", query: str = "", **_) -> ToolResult:
+    from .docs import python_doc as _python_doc
+
+    ok, text = _python_doc(name=name, query=query)
+    return ToolResult(ok, text)
+
+
+def arch_news(**_) -> ToolResult:
+    from .news import news_report
+
+    ok, text = news_report()
+    return ToolResult(ok, text)
+
+
+def man_page(command: str = "", query: str = "", section: str = "", **_) -> ToolResult:
+    from .docs import man_page as _man_page
+
+    ok, text = _man_page(command=command, query=query, section=section)
+    return ToolResult(ok, text)
 
 
 TOOLS: dict[str, ToolSpec] = {
@@ -1592,6 +1649,8 @@ TOOLS: dict[str, ToolSpec] = {
             "old": "exact text to find",
             "new": "replacement text",
             "all": "optional true to replace all occurrences (default first only)",
+            "edits": "optional list of {old, new, all} to apply several changes at "
+                     "once; nothing is changed unless every one applies",
         },
         run=edit_file,
         example='{"action":"edit_file","action_input":'
@@ -1784,6 +1843,89 @@ TOOLS: dict[str, ToolSpec] = {
         example='{"action":"undo_file_change","action_input":{"path":"~/notes.txt"}}',
         side_effect=True,
     ),
+    "arch_wiki": ToolSpec(
+        name="arch_wiki",
+        description="Look something up in the Arch Wiki and get the relevant "
+        "section of the best article. Use it BEFORE answering how to install, "
+        "configure or fix anything on Arch/Maze Linux (pacman, AUR, systemd, "
+        "drivers, audio, Bluetooth, networking, boot…) instead of relying on "
+        "memory, and cite the page. Search in English with the topic's own "
+        "words, e.g. 'pacman remove orphans', 'nvidia suspend'.",
+        args={
+            "query": "what to look up, in English",
+            "page": "optional exact article title, e.g. 'Pacman/Tips and tricks'",
+        },
+        run=arch_wiki,
+        example='{"action":"arch_wiki","action_input":{"query":"pacman remove orphans"}}',
+    ),
+    "search_folder": ToolSpec(
+        name="search_folder",
+        description="Search the folder the user attached to this chat and get the "
+        "most relevant passages with path:line references. Use keywords in the "
+        "files' own language (usually English for code), then read_file a path "
+        "for the full context.",
+        args={"query": "what to look for, e.g. 'emoji filter' or 'def parse_when'"},
+        run=search_folder,
+        example='{"action":"search_folder","action_input":{"query":"database connection"}}',
+    ),
+    "python_doc": ToolSpec(
+        name="python_doc",
+        description="Read the documentation of a Python module, class or function "
+        "installed on this machine (pydoc), optionally focused on a word. Use it "
+        "to check that an API exists and how it is called before you write code "
+        "that uses it — never guess signatures.",
+        args={
+            "name": "dotted name, e.g. 'pathlib.Path' or 'requests.get'",
+            "query": "optional word to focus on, e.g. 'timeout'",
+        },
+        run=python_doc,
+        example='{"action":"python_doc","action_input":{"name":"subprocess.run","query":"timeout"}}',
+    ),
+    "arch_news": ToolSpec(
+        name="arch_news",
+        description="Arch Linux news published since the user's last full system "
+        "upgrade, with items that need manual intervention flagged. Check it "
+        "before telling the user to upgrade (pacman -Syu, yay, paru) and warn "
+        "them about anything that needs action.",
+        args={},
+        run=arch_news,
+        example='{"action":"arch_news","action_input":{}}',
+    ),
+    "man_page": ToolSpec(
+        name="man_page",
+        description="Read the manual of a command installed on this machine, "
+        "focused on an option or word. Use it to check a flag or syntax before "
+        "you recommend or run a command you are not certain about — never "
+        "invent options.",
+        args={
+            "command": "the program, e.g. 'pacman'",
+            "query": "optional option(s) or word to focus on, e.g. '-Qdt' or 'overwrite'",
+            "section": "optional manual section, e.g. '5' for config files",
+        },
+        run=man_page,
+        example='{"action":"man_page","action_input":{"command":"pacman","query":"-Rns"}}',
+    ),
+    "remember": ToolSpec(
+        name="remember",
+        description="Save a short note about the user that you will see in every "
+        "future chat. Only when the user asks you to remember something, or "
+        "clearly states a lasting preference about how you should work (their "
+        "shell, editor, project folders, how they like answers). One fact per "
+        "note, in English or the user's language. Never store passwords, keys, "
+        "tokens or anything about other people.",
+        args={"text": "the note, e.g. 'Uses the fish shell'"},
+        run=remember,
+        example='{"action":"remember","action_input":{"text":"Projects live in ~/dev"}}',
+    ),
+    "forget": ToolSpec(
+        name="forget",
+        description="Delete a saved note about the user, by its text or id "
+        "('all' clears every note). Use when the user asks you to forget something "
+        "or a note is out of date.",
+        args={"which": "words from the note, its id, or 'all'"},
+        run=forget,
+        example='{"action":"forget","action_input":{"which":"fish shell"}}',
+    ),
     "notify": ToolSpec(
         name="notify",
         description="Send a desktop notification to the user. Use to get their "
@@ -1792,32 +1934,6 @@ TOOLS: dict[str, ToolSpec] = {
         run=notify,
         example='{"action":"notify","action_input":'
         '{"title":"Done","message":"Your backup finished."}}',
-    ),
-    "add_reminder": ToolSpec(
-        name="add_reminder",
-        description="Set a reminder / to-do that notifies the user at a given "
-        "time. Accepts 'in 10 minutes', '1 hour 30 minutes', '18:30', '9pm', "
-        "'tomorrow 09:00', '2026-07-16 14:00' or '16.07.2026 14:00' (Turkish "
-        "forms like '30 dakika sonra', 'yarın 9:00', 'akşam 8' work too). "
-        "Pass the user's time expression as-is rather than computing a date.",
-        args={"text": "what to remind about", "when": "when to remind"},
-        run=add_reminder,
-        example='{"action":"add_reminder","action_input":'
-        '{"text":"Take a break","when":"in 30 minutes"}}',
-    ),
-    "list_reminders": ToolSpec(
-        name="list_reminders",
-        description="List the user's pending reminders / to-dos.",
-        args={},
-        run=list_reminders,
-        example='{"action":"list_reminders","action_input":{}}',
-    ),
-    "remove_reminder": ToolSpec(
-        name="remove_reminder",
-        description="Remove a pending reminder by its id or matching text.",
-        args={"which": "reminder id or text to match"},
-        run=remove_reminder,
-        example='{"action":"remove_reminder","action_input":{"which":"Take a break"}}',
     ),
 }
 
@@ -1832,8 +1948,9 @@ _SCHEMA_HINTS: dict[str, tuple[dict[str, str], tuple[str, ...]]] = {
     "read_file": ({"path": "string", "offset": "integer", "limit": "integer"}, ("path",)),
     "write_file": ({"path": "string", "content": "string"}, ("path", "content")),
     "edit_file": (
-        {"path": "string", "old": "string", "new": "string", "all": "boolean"},
-        ("path", "old", "new"),
+        {"path": "string", "old": "string", "new": "string", "all": "boolean",
+         "edits": "array"},
+        ("path",),
     ),
     "append_file": ({"path": "string", "content": "string"}, ("path", "content")),
     "search_files": (
@@ -1859,9 +1976,13 @@ _SCHEMA_HINTS: dict[str, tuple[dict[str, str], tuple[str, ...]]] = {
     "ocr_image": ({"path": "string", "lang": "string"}, ("path",)),
     "undo_file_change": ({"path": "string"}, ()),
     "notify": ({"title": "string", "message": "string"}, ("message",)),
-    "add_reminder": ({"text": "string", "when": "string"}, ("text", "when")),
-    "list_reminders": ({}, ()),
-    "remove_reminder": ({"which": "string"}, ("which",)),
+    "arch_wiki": ({"query": "string", "page": "string"}, ()),
+    "remember": ({"text": "string"}, ("text",)),
+    "forget": ({"which": "string"}, ("which",)),
+    "man_page": ({"command": "string", "query": "string", "section": "string"}, ("command",)),
+    "arch_news": ({}, ()),
+    "python_doc": ({"name": "string", "query": "string"}, ("name",)),
+    "search_folder": ({"query": "string"}, ("query",)),
 }
 
 
@@ -1891,6 +2012,11 @@ def coerce_args(tool: str, args: dict | None) -> dict:
                 value = _as_bool(value)
             elif kind == "integer":
                 value = int(float(value)) if not isinstance(value, bool) else int(value)
+            elif kind == "array":
+                if isinstance(value, str):
+                    value = json.loads(value)
+                if not isinstance(value, list):
+                    continue
             elif kind == "string" and not isinstance(value, str):
                 value = (
                     json.dumps(value, ensure_ascii=False)
@@ -1914,11 +2040,15 @@ TOOL_GROUPS: dict[str, tuple[str, ...]] = {
         "undo_file_change",
     ),
     "web": ("fetch_url", "web_search"),
+    "docs": ("arch_wiki", "arch_news", "man_page", "python_doc"),
     "desktop": ("screenshot", "read_screen", "read_window", "ocr_image",
                 "clipboard_copy", "notify"),
-    "reminders": ("add_reminder", "list_reminders", "remove_reminder"),
+    "memory": ("remember", "forget"),
 }
 DEFAULT_GROUPS: tuple[str, ...] = tuple(TOOL_GROUPS)
+#: Tools switched on by the chat itself rather than a group: search_folder only
+#: makes sense once a folder is attached.
+CONTEXT_TOOLS: tuple[str, ...] = ("search_folder",)
 
 
 def tools_for_groups(groups: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -1960,6 +2090,10 @@ def tool_schemas(names: list[str] | None = None, compact: bool = False) -> list[
         properties = {
             arg: {
                 "type": types.get(arg, "string"),
+                **({"items": {"type": "object", "properties": {
+                    "old": {"type": "string"}, "new": {"type": "string"},
+                    "all": {"type": "boolean"}}, "required": ["old", "new"]}}
+                   if types.get(arg) == "array" else {}),
                 "description": _first_sentence(description, 70) if compact
                 else description,
             }

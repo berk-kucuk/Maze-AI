@@ -13,6 +13,8 @@ links opened only after the user has seen the real address.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics, QGuiApplication, QPixmap
@@ -40,6 +42,7 @@ from .theme import (
     LINE,
     LINE_HI,
     LOGO_PATH,
+    LOGO_SMALL_PATH,
     OK,
     TEXT,
     TEXT_DIM,
@@ -70,7 +73,6 @@ _TOOL_ICON = {
     "copy_path": "copy",
     "create_dir": "plus",
     "notify": "alarm",
-    "add_reminder": "alarm",
 }
 
 #: Widest the reading column gets, and how much of a long tool output the
@@ -160,6 +162,16 @@ class CodeBlock(QFrame):
         )
         head.addWidget(lang)
         head.addStretch(1)
+        self.language = (language or "").lower()
+        self.apply_btn = None
+        if self.language not in _NOT_FILES:
+            # Write it into a file — after the user has seen the change. Never
+            # a "run" button: Maze AI writes code, the user runs it.
+            self.apply_btn = _action_button(tr("Apply to file"), "file",
+                                            tr("Write this code into a file (you see the "
+                                               "change before anything is saved)"))
+            self.apply_btn.clicked.connect(self._apply)
+            head.addWidget(self.apply_btn)
         self.copy_btn = _action_button(tr("Copy"), "copy", tr("Copy code"))
         self.copy_btn.clicked.connect(self._copy)
         head.addWidget(self.copy_btn)
@@ -178,6 +190,64 @@ class CodeBlock(QFrame):
     def _copy(self) -> None:
         QGuiApplication.clipboard().setText(self.code)
         _flash_copied(self.copy_btn, tr("Copy"), "copy")
+
+    def _apply(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        from ..agent.agent import _diff_preview
+        from ..agent.codecheck import validate_content
+        from ..agent.tools import write_file
+        from .dialogs import ConfirmDialog, notify_toast
+
+        suggested = str(Path.home() / f"untitled{_EXTENSIONS.get(self.language, '.txt')}")
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), tr("Apply code to file"), suggested,
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if not path:
+            return
+        diff = _diff_preview(path, self.code)
+        lines = diff.splitlines()
+        if len(lines) > 60:
+            diff = "\n".join(lines[:60]) + "\n" + tr("… {count} more lines").format(
+                count=len(lines) - 60)
+        problem = validate_content(path, self.code)
+        message = (tr("This code doesn't parse, so it won't be saved: {error}").format(
+                   error=problem) if problem else
+                   tr("The current version is backed up and can be restored."))
+        dialog = ConfirmDialog(
+            tr("Write this code to {name}?").format(name=Path(path).name), message,
+            detail=diff, confirm=tr("Write file"), danger=bool(problem),
+            parent=self.window(),
+        )
+        if not dialog.exec() or problem:
+            return
+        result = write_file(path=path, content=self.code)
+        if result.ok:
+            # The code came from the model: whatever chat shows this block must
+            # treat the file as model-written, so its agent can never run it.
+            for listener in list(_APPLIED_LISTENERS):
+                listener(str(Path(path).expanduser().resolve()))
+        notify_toast(self.window(), tr("Saved to {path}").format(path=path) if result.ok
+                     else result.output, kind="ok" if result.ok else "danger")
+
+
+#: Called with the path whenever the user applies a code block to a file.
+_APPLIED_LISTENERS: list[Callable[[str], None]] = []
+
+
+def add_applied_listener(listener: Callable[[str], None]) -> None:
+    _APPLIED_LISTENERS.append(listener)
+
+
+#: Fence languages that are command lines or output, not file contents.
+_NOT_FILES = {"", "console", "text", "output", "log", "plaintext", "diff", "shell-session"}
+_EXTENSIONS = {"python": ".py", "py": ".py", "bash": ".sh", "sh": ".sh", "zsh": ".sh",
+               "javascript": ".js", "js": ".js", "typescript": ".ts", "ts": ".ts",
+               "json": ".json", "toml": ".toml", "yaml": ".yaml", "yml": ".yaml",
+               "rust": ".rs", "go": ".go", "c": ".c", "cpp": ".cpp", "c++": ".cpp",
+               "html": ".html", "css": ".css", "sql": ".sql", "ini": ".ini",
+               "markdown": ".md", "md": ".md", "lua": ".lua", "java": ".java"}
 
 
 def split_code_blocks(text: str) -> list[tuple[str, str, str]]:
@@ -570,7 +640,7 @@ class _Row(QWidget):
         else:
             if avatar:
                 av = QLabel()
-                pix = QPixmap(LOGO_PATH)
+                pix = QPixmap(LOGO_SMALL_PATH)
                 if not pix.isNull():
                     ratio = 2.0
                     scaled = pix.scaled(int(26 * ratio), int(26 * ratio),
@@ -996,3 +1066,14 @@ class ChatView(QScrollArea):
 
     def scroll_to_top(self) -> None:
         self.verticalScrollBar().setValue(0)
+
+
+def notice_text(ev) -> str:
+    """An agent notice in the interface language."""
+    args = ev.args or {}
+    if args.get("why") == "code":
+        return tr("{model} answers this coding question.").format(model=args["model"])
+    if "model" in args:
+        return tr("{current} can't see images, so {model} answers this message.").format(
+            current=args.get("current", ""), model=args["model"])
+    return ev.text

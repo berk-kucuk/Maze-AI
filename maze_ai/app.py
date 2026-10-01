@@ -11,15 +11,16 @@ import struct
 import sys
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QFont
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
 from . import autostart, logs
 from .config import Config
 from .i18n import set_language, tr
+from .ui.icons import app_icon
 from .ui.main_window import MainWindow
-from .ui.theme import LOGO_PATH, STYLESHEET
+from .ui.theme import STYLESHEET
 from .ui.tray import Tray
 
 log = logging.getLogger(__name__)
@@ -256,7 +257,7 @@ def main() -> int:
     app.setApplicationName("Maze AI")
     app.setApplicationDisplayName("Maze AI")
     app.setDesktopFileName("maze-ai")
-    app.setWindowIcon(QIcon(LOGO_PATH))
+    app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)  # keep running in the tray
     font = QFont("Inter")
     font.setStyleHint(QFont.StyleHint.SansSerif)
@@ -320,7 +321,7 @@ def main() -> int:
     tray = Tray(window, app) if tray_ok else None
     if tray:
         tray.show()
-        window.tray = tray  # lets the window/reminders notify through the tray
+        window.tray = tray  # lets the window notify through the tray
         window.hidden_to_tray.connect(
             lambda: tray.notify("Maze AI", tr("Still running in the tray."))
         )
@@ -357,10 +358,8 @@ def main() -> int:
     # running, and the window must not wait on its timeout to appear.
     QTimer.singleShot(0, window.resolve_model_async)
 
-    # Greet the user (in their language) and surface any reminders that came
-    # due while the app was closed, shortly after the tray is up.
+    # Greet the user (in their language), shortly after the tray is up.
     QTimer.singleShot(1200, window.greet)
-    QTimer.singleShot(1500, window._check_reminders)
 
     return app.exec()
 

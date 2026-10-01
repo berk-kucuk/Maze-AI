@@ -35,6 +35,9 @@ class Conversation:
     created: float = field(default_factory=time.time)
     updated: float = field(default_factory=time.time)
     messages: list[dict] = field(default_factory=list)  # [{"role","content"}]
+    #: Agent state that belongs to this chat: the summary of messages that no
+    #: longer fit in the model's window ({"summary": str, "upto": int}).
+    context: dict = field(default_factory=dict)
 
     # ── derived ──────────────────────────────────────────────────────────
     @property
@@ -68,6 +71,7 @@ class Conversation:
                 {k: v for k, v in msg.items() if k != "images"}
                 for msg in self.messages
             ],
+            "context": dict(self.context),
         }
 
     @classmethod
@@ -85,6 +89,8 @@ class Conversation:
             created=float(data.get("created") or time.time()),
             updated=float(data.get("updated") or time.time()),
             messages=messages,
+            context=dict(data.get("context") or {}) if isinstance(data.get("context"), dict)
+            else {},
         )
 
 

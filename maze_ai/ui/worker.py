@@ -158,3 +158,36 @@ class CallWorker(QThread):
             self.failed.emit(self.token, str(exc))
             return
         self.done.emit(self.token, result)
+
+
+class FolderIndexWorker(QThread):
+    """Indexes (or refreshes) a folder off the UI thread, reporting progress."""
+
+    progress = Signal(str, int, int)     # phase, done, total
+    finished_ok = Signal(str, object)    # folder, IndexStats
+    failed = Signal(str, str)            # folder, error
+
+    def __init__(self, agent: Agent, folder: str) -> None:
+        super().__init__()
+        self.agent = agent
+        self.folder = folder
+
+    def run(self) -> None:
+        from ..folder_index import FolderIndex
+
+        try:
+            # Its own connection: SQLite objects stay on the thread using them.
+            index = FolderIndex(self.folder)
+            embed = self.agent.embedder()
+            model = (self.agent._embed_cache or ("", ""))[1] if embed else ""
+            stats = index.update(
+                embed=embed, embed_model=model,
+                progress=lambda phase, done, total: self.progress.emit(phase, done, total),
+                cancelled=self.isInterruptionRequested,
+            )
+            index.close()
+        except Exception as exc:  # noqa: BLE001 - reported to the UI
+            log.warning("indexing %s failed: %s", self.folder, exc)
+            self.failed.emit(self.folder, str(exc))
+            return
+        self.finished_ok.emit(self.folder, stats)

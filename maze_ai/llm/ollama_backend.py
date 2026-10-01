@@ -836,6 +836,34 @@ class OllamaBackend(LLMBackend):
         self._info_cache.pop(name, None)
         self._tags_cache.pop(name, None)
 
+    # ── embeddings (for chatting with a folder) ──────────────────────────
+    def embedding_models(self) -> list[str]:
+        """Installed models that produce embeddings."""
+        out = []
+        for entry in self.installed_models():
+            caps = entry.get("capabilities") or self.model_info(entry["name"]).get(
+                "capabilities") or []
+            if "embedding" in caps:
+                out.append(entry["name"])
+        return out
+
+    def embed(self, texts: list[str], model: str) -> list[list[float]]:
+        """Vectors for ``texts`` from an embedding model (raises LLMError)."""
+        try:
+            resp = requests.post(
+                f"{self.host}/api/embed",
+                json={"model": model, "input": texts, "keep_alive": "5m", "truncate": True},
+                timeout=120,
+            )
+        except requests.RequestException as exc:
+            raise self._unreachable(exc) from exc
+        if resp.status_code != 200:
+            raise LLMError(f"Ollama embed error {resp.status_code}: {resp.text[:200]}")
+        vectors = resp.json().get("embeddings") or []
+        if len(vectors) != len(texts):
+            raise LLMError("Ollama returned the wrong number of embeddings.")
+        return vectors
+
     def describe(self) -> str:
         return f"Ollama · {self.model}"
 

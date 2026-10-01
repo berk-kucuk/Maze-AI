@@ -210,6 +210,8 @@ def test_an_image_falls_back_to_ocr_without_vision(app, config, tmp_path, monkey
     window = QuickAsk(config)
     monkeypatch.setattr(type(window.agent.backend), "supports_vision", False,
                         raising=False)
+    # …and no installed model that could stand in for it.
+    monkeypatch.setattr(window.agent, "vision_fallback", lambda: "")
     window.load_files([str(shot)])
     assert window._images == []
     assert str(shot) in window.composer.toPlainText()

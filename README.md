@@ -4,7 +4,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.21.0-blue)
+![Version](https://img.shields.io/badge/version-1.23.0-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0--or--later-green)
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Qt](https://img.shields.io/badge/Qt-6.6+-teal)
@@ -67,18 +67,15 @@ Remove with `sudo pacman -Rns maze-ai`.
 
 ### Build from source
 
-The package is built from this working tree by `build-package.sh` and installed with pacman:
+The package is built from this working tree by `build-package.sh`. It installs any missing build tools itself, and `--install` installs the result together with every dependency:
 
 ```bash
-sudo pacman -S --needed base-devel git
 git clone https://github.com/berk-kucuk/Maze-AI.git
 cd Maze-AI
-sudo pacman -S --needed $(bash -c 'source PKGBUILD; echo "${depends[@]}" "${makedepends[@]}"')
-./build-package.sh
-sudo pacman -U dist-pkg/maze-ai-*.pkg.tar.zst
+./build-package.sh --install
 ```
 
-Maze AI needs **Ollama** running on `localhost:11434` (see Quick Start).
+Everything Maze AI uses comes with the package — Ollama, OCR (Tesseract with English and Turkish data), the offline Arch Wiki, screenshot and clipboard tools, and the linters that check the code it writes. Only the GPU backend for Ollama depends on your hardware; the installer tells you which one to add (`ollama-cuda` for NVIDIA, `ollama-rocm` or `ollama-vulkan` for AMD).
 
 For development, install it editable into a virtual environment instead: `pip install -e ".[dev]"`.
 
@@ -127,7 +124,7 @@ Press **Ctrl+/** (or **F1**) at any time to see every keyboard shortcut.
 | Window | | Quick Ask & approvals | |
 |---|---|---|---|
 | Settings | `Ctrl+,` | Quick Ask (anywhere) | `Meta+M` |
-| Reminders | `Ctrl+Shift+R` | Copy answer / continue in chat | `Ctrl+Shift+C` / `Ctrl+Shift+Enter` |
+| Keyboard shortcuts | `Ctrl+/`, `F1` | Copy answer / continue in chat | `Ctrl+Shift+C` / `Ctrl+Shift+Enter` |
 | Keyboard shortcuts | `Ctrl+/`, `F1` | Clipboard actions | `Alt+1` … `Alt+4` |
 | Maximize / restore | `F11` | Approve a command | `Ctrl+Enter` |
 | Hide the window | `Ctrl+W` | Deny / always allow | `Esc` / `Alt+A` |
@@ -154,7 +151,7 @@ maze_ai/
 ├── cli.py              # Headless --fix / --ask-cli / --shell-init
 ├── config.py           # Settings (~/.config/maze-ai/config.json, 0600)
 ├── style.py            # Personality presets, creativity, emoji → emoticon filter
-├── history.py          # Saved chats; reminders.py — reminder store + time parser
+├── history.py          # Saved chats; memory.py — notes it keeps about you
 ├── i18n.py             # Turkish / English interface strings
 ├── agent/
 │   ├── agent.py        # Agent loop: native tool calling or JSON protocol, approvals
@@ -168,7 +165,7 @@ maze_ai/
 │   ├── openai_backend.py   # Any OpenAI-compatible /v1 endpoint
 │   └── library.py          # ollama.com model browser
 └── ui/                 # PySide6 windows: main_window, quick_ask, settings_dialog,
-                        # chat_view, approval, reminders_dialog, sidebar, tray, …
+                        # chat_view, approval, sidebar, tray, …
 ```
 
 ### Data Flow
@@ -213,8 +210,25 @@ Tools are grouped, and each group can be switched off in **Settings → Behaviou
 | Shell | `run_command`, `launch_app`, `recent_commands` |
 | Files | `read_file`, `write_file`, `edit_file`, `append_file`, `list_dir`, `search_files`, `create_dir`, `delete_path`, `move_path`, `copy_path`, `undo_file_change` |
 | Web | `web_search`, `fetch_url` |
+| Docs | `arch_wiki`, `arch_news`, `man_page`, `python_doc` |
 | Desktop | `screenshot`, `read_screen`, `read_window`, `ocr_image`, `clipboard_copy`, `notify` |
-| Reminders | `add_reminder`, `list_reminders`, `remove_reminder` |
+| Memory | `remember`, `forget` |
+
+**Checked answers.** For questions about running or fixing the system (pacman, systemd, drivers, audio, Bluetooth…), Maze AI looks the topic up in the Arch Wiki *before* the model answers and hands it the relevant section, so commands come from the wiki rather than the model's memory. It uses the offline copy from `arch-wiki-docs` when installed, wiki.archlinux.org otherwise. `man_page` reads the manual of the program actually installed, focused on the option in question (`-Qdt` is looked up as `-Q`, `-d`, `-t`).
+
+**Memory.** Ask "remember that I use the fish shell" and Maze AI keeps a short note, added to every chat as background (Settings → Personality, where notes can be edited). Notes stay on this computer, secrets are refused, and a note the model wants to save right after reading a web page or file needs your approval. Long chats keep their thread: messages that no longer fit the context window are condensed into a summary saved with the chat.
+
+**Arch news before upgrades.** When you talk about updating the system, Maze AI reads the Arch news feed, compares it with your last full upgrade in `/var/log/pacman.log`, and warns you first about anything that needs manual intervention — with the steps exactly as the news gives them.
+
+**Know what you approve.** The approval dialog explains a command part by part from the manual pages installed on your machine (`pacman -Rns` → remove · ignore backup files · remove unneeded dependencies), never from the model, and updates as you edit the command.
+
+**Pictures with any model.** If the current model can't see images, an installed model that can (one that fits your GPU, preferably) answers that one message, and the next turn is back on your model.
+
+**Chat with a folder.** Attach a project or documents folder with the folder button: Maze AI indexes its text files locally (SQLite full-text search; an Ollama embedding model such as `embeddinggemma` adds meaning-based search), finds the relevant passages for every question and answers with `path:line` citations. Secrets, binaries and `node_modules`-style folders are never indexed; the index stays owner-only in `~/.cache/maze-ai/folders/`, and only changed files are re-read.
+
+**Writes code, never runs it.** Maze AI can write and edit code, but code a model wrote can do anything once it runs — so running it is always your call. Inline code (`python -c`, `bash -c`, `eval`, piping into an interpreter), any file Maze AI wrote, downloaded or you applied from an answer, and tests or builds after it changed code are blocked in every mode, even after an approval. Instead, every save is checked *statically*: a file that doesn't parse is refused, and installed linters (`ruff`, `shellcheck`, `bash -n`, `node --check`, `gcc -fsyntax-only`) report problems back so the model fixes them. `python_doc` reads the real documentation of installed libraries (in an isolated interpreter that can't import your project), a project map (file outline, conventions, `git status` with repository hooks disabled) keeps changes in the project's style, coding questions go to an installed coding model such as `qwen2.5-coder`, and code blocks in answers have an **Apply to file** button that shows the diff first.
+
+**The right model for your hardware.** Settings recommends the biggest tool-calling model that stays entirely in your VRAM (installed ones first), and the status bar offers a one-click switch when the current model spills onto the CPU.
 
 Every shell command (and every app `launch_app` would start) goes through a three-tier rule set (`maze_ai/agent/rules.py`, listed in **Settings → Command rules**):
 
@@ -224,7 +238,6 @@ Every shell command (and every app `launch_app` would start) goes through a thre
 
 You can add your own blocked and safe commands (a command prefix like `git push`, or `re:` plus a regular expression); your safe entries never outrank a built-in block or confirmation. Reading keys, tokens or shell history, and requests that carry data out of the machine, are always confirmed. Overwritten or deleted files are backed up and can be restored with `undo_file_change`.
 
-Reminders understand times like `in 10 minutes`, `1 saat 30 dakika sonra`, `18:30`, `18.30`, `akşam 8`, `9pm`, `yarın 10:00` and `16.10.2026 14:00`.
 
 ## Configuration
 
@@ -235,7 +248,7 @@ Settings are stored in `~/.config/maze-ai/` (XDG-compliant):
 ├── config.json         # Model, hotkey, language, animation speeds
 ```
 
-Chats, reminders and undo backups live in `~/.local/share/maze-ai/`; pasted images in `~/.cache/maze-ai/pasted/`. All of it is created owner-only (directories 0700, files 0600), and files left world-readable by older versions are tightened on first start.
+Chats, memory notes and undo backups live in `~/.local/share/maze-ai/`; pasted images in `~/.cache/maze-ai/pasted/`. All of it is created owner-only (directories 0700, files 0600), and files left world-readable by older versions are tightened on first start.
 
 ## Development
 
@@ -245,7 +258,7 @@ Chats, reminders and undo backups live in `~/.local/share/maze-ai/`; pasted imag
 pytest -v
 ```
 
-All 788 tests pass (UI behavior, streaming, language detection, tool execution). Tests that talk to a real Ollama server run with `MAZE_AI_LIVE=1` (optionally `MAZE_AI_LIVE_MODEL=<name>`).
+All 893 tests pass (UI behavior, streaming, language detection, tool execution). Tests that talk to a real Ollama server run with `MAZE_AI_LIVE=1` (optionally `MAZE_AI_LIVE_MODEL=<name>`).
 
 ### Linting
 

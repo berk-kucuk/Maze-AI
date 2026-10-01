@@ -43,6 +43,8 @@ def test_faces_become_emoticons(text, expected):
     ("dev 👨‍💻 mode", "dev mode"),
     ("wave 👋🏽 hi", "wave o/ hi"),
     ("1️⃣ first", "1 first"),
+    ("**⚠️ Careful**", "**Careful**"),
+    ("_✨ new_", "_new_"),
 ])
 def test_other_pictographs_are_removed_cleanly(text, expected):
     assert strip_emoji(text) == expected

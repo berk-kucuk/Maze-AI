@@ -20,39 +20,38 @@ from PySide6.QtWidgets import (
 
 from ..agent import Agent, AgentEvent, ApprovalRequest
 from ..agent.prompts import display_text
-from ..agent.tools import set_reminder_store
 from ..config import Config
 from ..history import ChatStore, Conversation, export_markdown
 from ..i18n import tr
 from ..llm import OllamaBackend, build_backend, resolve_ollama_model
 from ..llm.hardware import GB
-from ..reminders import ReminderStore
+from ..llm.recommend import recommend_for
 from .approval import ApprovalDialog
-from .chat_view import COLUMN_MAX, ChatView
+from .chat_view import COLUMN_MAX, ChatView, add_applied_listener
+from .chat_view import notice_text as _notice_text
 from .dialogs import ConfirmDialog, PromptDialog, ShortcutsDialog, notify_toast, shortcut_text
 from .effects import AuroraCard, GlowDot
 from .input_bar import InputBar
 from .onboarding import OnboardingDialog
-from .reminders_dialog import RemindersDialog
 from .richtext import harden_labels, plain_label
 from .settings_dialog import SettingsDialog
 from .sidebar import HistorySidebar
 from .theme import LOGO_PATH, OK, STYLESHEET, TEXT_FAINT
 from .title_bar import TitleBar
-from .worker import AgentWorker, ModelResolveWorker
+from .worker import AgentWorker, FolderIndexWorker, ModelResolveWorker
 
 # The first screen of a new chat.
 EMPTY_TITLE = "How can I help?"
 EMPTY_SUBTITLE = (
-    "Commands, files, apps, the web and reminders on Maze Linux — "
+    "Commands, files, apps and the web on Maze Linux — "
     "anything that changes your system asks you first."
 )
 SUGGESTIONS: list[tuple[str, str, str]] = [
     ("terminal", "Show my disk usage", "Show my disk usage and the biggest folders in my home."),
     ("sparkle", "Open Firefox", "Open Firefox."),
     ("file", "Create a Python venv in ~/dev", "Create a Python virtual environment in ~/dev/venv."),
-    ("alarm", "Remind me to take a break in 30 minutes",
-     "Remind me to take a break in 30 minutes."),
+    ("globe", "How do I set up Bluetooth headphones?",
+     "How do I set up Bluetooth headphones on Maze Linux?"),
 ]
 
 # Localized startup greetings, keyed by output-language code.
@@ -83,6 +82,8 @@ class MainWindow(QWidget):
         self.agent = Agent.from_config(config)
         self.worker: AgentWorker | None = None
         self._resolver: ModelResolveWorker | None = None
+        # Code the user applies from an answer counts as model-written.
+        add_applied_listener(lambda path: self.agent.mark_written(path))
         # Local-model telemetry and server health, filled in off the UI thread.
         self._last_metrics: dict = {}
         self._ollama_ok: bool | None = None
@@ -98,10 +99,8 @@ class MainWindow(QWidget):
         self.store = ChatStore()
         self.conversation = Conversation()
         self.agent.history = self.conversation.messages
+        self.agent.context = self.conversation.context
 
-        # Reminders: shared store between the agent's tools and the UI's checker.
-        self.reminders = ReminderStore()
-        set_reminder_store(self.reminders)
         self.tray = None  # set by app.py once the tray exists
 
         self.setWindowTitle("Maze AI")
@@ -147,7 +146,6 @@ class MainWindow(QWidget):
         self.title_bar.close_clicked.connect(self._on_close_button)
         self.title_bar.settings_clicked.connect(self.open_settings)
         self.title_bar.sidebar_clicked.connect(self.toggle_sidebar)
-        self.title_bar.reminders_clicked.connect(self.open_reminders)
         self.title_bar.shortcuts_clicked.connect(self.show_shortcuts)
         column.addWidget(self.title_bar)
 
@@ -165,6 +163,8 @@ class MainWindow(QWidget):
 
         self.input_bar = InputBar()
         self.input_bar.send.connect(self.on_send)
+        self.input_bar.folder_requested.connect(self.attach_folder)
+        self.input_bar.folder_detach.connect(self.detach_folder)
         self.input_bar.stop.connect(self.on_stop)
         self.input_bar.composer.recall_requested.connect(self.recall_last_message)
         self.input_bar.composer.page_requested.connect(self.chat.scroll_page)
@@ -184,6 +184,14 @@ class MainWindow(QWidget):
         self.shrink_ctx_btn.clicked.connect(self.shrink_context)
         self.shrink_ctx_btn.hide()
         status_row.addWidget(self.shrink_ctx_btn)
+        # When the model spills onto the CPU and an installed one would fit.
+        self.switch_model_btn = QPushButton("")
+        self.switch_model_btn.setObjectName("chip")
+        self.switch_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.switch_model_btn.clicked.connect(self.switch_to_recommended)
+        self.switch_model_btn.hide()
+        status_row.addWidget(self.switch_model_btn)
+        self._recommendation = None
 
         self.start_ollama_btn = QPushButton(tr("Start Ollama"))
         self.start_ollama_btn.setObjectName("chip")
@@ -217,11 +225,6 @@ class MainWindow(QWidget):
         self._refresh_sidebar()
         harden_labels(self)
 
-        # Poll for due reminders and fire desktop notifications.
-        self._reminder_timer = QTimer(self)
-        self._reminder_timer.setInterval(20_000)  # every 20s
-        self._reminder_timer.timeout.connect(self._check_reminders)
-        self._reminder_timer.start()
 
     # ── keyboard ─────────────────────────────────────────────────────────
     def shortcut_table(self) -> list[tuple[str, list[tuple[str, str]]]]:
@@ -253,7 +256,6 @@ class MainWindow(QWidget):
             ]),
             (tr("Window"), [
                 (tr("Settings"), "Ctrl+,"),
-                (tr("Reminders"), "Ctrl+Shift+R"),
                 (tr("Keyboard shortcuts"), "Ctrl+/ / F1"),
                 (tr("Maximize / restore"), "F11"),
                 (tr("Hide the window"), "Ctrl+W"),
@@ -292,7 +294,6 @@ class MainWindow(QWidget):
             ("Ctrl+O", self.input_bar.attach),
             ("Ctrl+L", self.focus_composer),
             ("Ctrl+,", self.open_settings),
-            ("Ctrl+Shift+R", self.open_reminders),
             ("Ctrl+/", self.show_shortcuts),
             ("F1", self.show_shortcuts),
             ("F11", self.toggle_maximized),
@@ -481,6 +482,7 @@ class MainWindow(QWidget):
         self.conversation.messages.extend(dict(m) for m in messages)
         self.conversation.touch()
         self.agent.history = self.conversation.messages
+        self.agent.context = self.conversation.context
         self._render_conversation()
         self._save_current()
         self._refresh_sidebar()
@@ -506,7 +508,7 @@ class MainWindow(QWidget):
         whole application, so quitting seconds after launch (while the model
         check is still talking to Ollama) would crash on the way out.
         """
-        for attr, grace in (("worker", 1500), ("_resolver", 6000)):
+        for attr, grace in (("worker", 1500), ("_resolver", 6000), ("_indexer", 3000)):
             thread = getattr(self, attr, None)
             if thread is None:
                 continue
@@ -557,6 +559,17 @@ class MainWindow(QWidget):
                     backend.preload()
             if ok:
                 self._runtime = backend.runtime()
+                try:
+                    self._can_see = self.agent.can_see()
+                except Exception:  # noqa: BLE001 - a hint, never a failure
+                    self._can_see = None
+                if self._runtime.spilled:
+                    try:
+                        self._recommendation = recommend_for(backend)
+                    except Exception:  # noqa: BLE001 - a hint, never a failure
+                        self._recommendation = None
+                else:
+                    self._recommendation = None
             self._warming = False
 
         threading.Thread(target=work, daemon=True, name="ollama-check").start()
@@ -661,7 +674,36 @@ class MainWindow(QWidget):
             except Exception:  # noqa: BLE001 - a hint must never break the UI
                 show_fix = False
         self.shrink_ctx_btn.setVisible(show_fix)
+        rec = self._recommendation
+        offer = (
+            backend is not None and runtime is not None and runtime.spilled
+            and rec is not None and rec.installed and rec.model != backend.model
+        )
+        if offer:
+            self.switch_model_btn.setText(tr("Switch to {model}").format(model=rec.model))
+            self.switch_model_btn.setToolTip(
+                tr("{current} doesn't fit in your GPU and partly runs on the CPU. "
+                   "{model} is installed and fits entirely, so it answers several "
+                   "times faster.").format(current=backend.model, model=rec.model)
+            )
+        self.switch_model_btn.setVisible(bool(offer))
         self._refresh_status()
+
+    def switch_to_recommended(self) -> None:
+        """Make the recommended (installed, GPU-fitting) model the active one."""
+        rec = self._recommendation
+        if rec is None or self._busy():
+            return
+        self.config.set("ollama_model", rec.model)
+        self.config.save()
+        self.agent.apply_config(self.config)
+        self._sync_quick_agent()
+        self._recommendation = None
+        self._runtime = None
+        self.switch_model_btn.hide()
+        self.shrink_ctx_btn.hide()
+        notify_toast(self, tr("Now using {model}.").format(model=rec.model), kind="ok")
+        self.check_ollama_async()
 
     def start_ollama(self) -> None:
         """Try to bring the local Ollama server up, then re-check."""
@@ -677,12 +719,12 @@ class MainWindow(QWidget):
         self.status_label.setText(tr("Starting Ollama…"))
         QTimer.singleShot(2500, self.check_ollama_async)
 
-    # ── notifications / reminders ────────────────────────────────────────
+    # ── notifications ────────────────────────────────────────────────────
     def notify(self, title: str, message: str) -> None:
         """Send a desktop notification via the tray (or notify-send fallback).
 
         Notification servers render a subset of HTML in the body (links,
-        images, bold). Reminder text comes from the agent, so it is escaped:
+        images, bold). The text may come from the agent, so it is escaped:
         a notification must show text, never fetch or link to anything.
         """
         body = html.escape(message or "", quote=False)
@@ -698,18 +740,12 @@ class MainWindow(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
-    def _check_reminders(self) -> None:
-        self.reminders.load()  # pick up reminders added by the agent tools
-        for r in self.reminders.due():
-            self.notify(tr("Reminder"), r.text)
-
     def greet(self) -> None:
         """Send a one-time greeting notification in the chosen language."""
         if not self.config.get("greet_on_start"):
             return
         lang = self.config.get("output_language") or "auto"
         text = GREETINGS.get(lang, GREETINGS["en"])
-        # Also surface any reminders the user missed while the app was closed.
         self.notify("Maze AI", text)
 
     # ── status / config ──────────────────────────────────────────────────
@@ -746,7 +782,13 @@ class MainWindow(QWidget):
         self.status_label.setText("  ·  ".join(parts))
         down = self.ollama_backend() is not None and self._ollama_ok is False
         self.status_dot.set_color("#ff6b6b" if down else OK)
-        self.input_bar.set_vision(getattr(self.agent.backend, "supports_vision", False))
+        # Known after the background check: the model itself, or an installed
+        # stand-in that can look at pictures for it.
+        can_see = getattr(self, "_can_see", None)
+        self.input_bar.set_vision(
+            can_see if can_see is not None
+            else getattr(self.agent.backend, "supports_vision", False)
+        )
 
     def open_settings(self) -> None:
         dlg = SettingsDialog(self.config, self)
@@ -759,6 +801,84 @@ class MainWindow(QWidget):
             self._refresh_status()
             self.check_ollama_async()
 
+    # ── chatting with a folder ───────────────────────────────────────────
+    def attach_folder(self, folder: str = "") -> None:
+        """Attach a folder to this chat and index it in the background."""
+        if self._busy():
+            notify_toast(self, tr("Wait for the answer to finish, or press Esc to stop it."))
+            return
+        if not folder:
+            folder = QFileDialog.getExistingDirectory(
+                self, tr("Choose a folder to chat with"), str(Path.home())
+            )
+        if not folder:
+            return
+        path = Path(folder).expanduser().resolve()
+        if path == Path("/") or path == Path.home().resolve():
+            notify_toast(self, tr("Pick a project or documents folder, not your whole "
+                                  "home or the system."), kind="danger")
+            return
+        self.conversation.context["folder"] = str(path)
+        self._index_folder(str(path))
+
+    def detach_folder(self) -> None:
+        if self.conversation.context.pop("folder", None) is not None:
+            self._stop_indexer()
+            self.input_bar.set_folder("")
+            self._save_current()
+            notify_toast(self, tr("Folder detached from this chat."))
+
+    def _stop_indexer(self) -> None:
+        worker = getattr(self, "_indexer", None)
+        if worker is not None and worker.isRunning():
+            worker.requestInterruption()
+            worker.wait(3000)
+        self._indexer = None
+
+    def _index_folder(self, folder: str) -> None:
+        """(Re)index the chat's folder; only changed files are read again."""
+        self._stop_indexer()
+        name = Path(folder).name
+        self.input_bar.set_folder(tr("{name} · indexing…").format(name=name), folder)
+        worker = FolderIndexWorker(self.agent, folder)
+        worker.progress.connect(
+            lambda phase, done, total, n=name: self.input_bar.set_folder(
+                tr("{name} · reading files {done}/{total}").format(name=n, done=done, total=total)
+                if phase == "reading" else
+                tr("{name} · understanding {pct}%").format(
+                    name=n, pct=done * 100 // max(1, total))
+            )
+        )
+        worker.finished_ok.connect(self._on_folder_indexed)
+        worker.failed.connect(lambda f, err: self.input_bar.set_folder(
+            tr("{name} · indexing failed").format(name=Path(f).name), err))
+        self._indexer = worker
+        worker.start()
+
+    def _on_folder_indexed(self, folder: str, stats) -> None:
+        if self.conversation.context.get("folder") != folder:
+            return              # detached or another chat in the meantime
+        self._save_current()
+        tip = tr("{files} text files indexed in {folder}. Ask anything about them.").format(
+            files=stats.files, folder=folder)
+        if not stats.embedded:
+            tip += "\n" + tr(
+                "Tip: install an embedding model for search that understands meaning, "
+                "not just words: ollama pull embeddinggemma")
+        if stats.truncated:
+            tip += "\n" + tr("The folder is large; only the first part was indexed.")
+        self.input_bar.set_folder(
+            tr("{name} · {files} files").format(name=Path(folder).name, files=stats.files), tip)
+
+    def _show_folder_of_chat(self) -> None:
+        """When a chat is opened, bring its folder chip (and index) up to date."""
+        folder = self.conversation.context.get("folder")
+        if folder and Path(folder).is_dir():
+            self._index_folder(folder)
+        else:
+            self._stop_indexer()
+            self.input_bar.set_folder("")
+
     def _sync_quick_agent(self) -> None:
         """Quick Ask lives on between uses: hand it the new settings too.
 
@@ -768,9 +888,6 @@ class MainWindow(QWidget):
         window = getattr(self, "_quick", None)
         if window is not None:
             window.agent.apply_config(self.config)
-
-    def open_reminders(self) -> None:
-        RemindersDialog(self.reminders, self).exec()
 
     def maybe_onboard(self) -> None:
         """Show the first-run welcome once; open Settings if the user opts in."""
@@ -784,6 +901,7 @@ class MainWindow(QWidget):
     # ── conversation management ──────────────────────────────────────────
     def _render_conversation(self) -> None:
         """Draw the current conversation's messages, or the welcome screen."""
+        self._show_folder_of_chat()
         self.chat.clear()
         self.title_bar.set_title(
             tr("New chat") if self.conversation.is_empty
@@ -852,6 +970,7 @@ class MainWindow(QWidget):
         self._save_current()
         self.conversation = Conversation()
         self.agent.history = self.conversation.messages
+        self.agent.context = self.conversation.context
         self._render_conversation()
         self._refresh_sidebar()
         self._sync_regen_state()
@@ -870,6 +989,7 @@ class MainWindow(QWidget):
             return
         self.conversation = loaded
         self.agent.history = self.conversation.messages
+        self.agent.context = self.conversation.context
         self._render_conversation()
         self._refresh_sidebar()
         self._sync_regen_state()
@@ -903,6 +1023,7 @@ class MainWindow(QWidget):
             # Deleting the open chat drops us onto a fresh one.
             self.conversation = Conversation()
             self.agent.history = self.conversation.messages
+            self.agent.context = self.conversation.context
             self._render_conversation()
             self._sync_regen_state()
         self._refresh_sidebar()
@@ -1006,6 +1127,8 @@ class MainWindow(QWidget):
         elif ev.kind == "denied":
             self.chat.add_step("denied", tool=ev.tool,
                                text=tr("Action denied by user."), ok=False)
+        elif ev.kind == "notice":
+            self.chat.add_step("thought", text=_notice_text(ev))
         elif ev.kind == "blocked":
             self.chat.add_step("denied", tool=ev.tool, ok=False,
                                text=tr("Blocked by the safety rules: {rule}").format(

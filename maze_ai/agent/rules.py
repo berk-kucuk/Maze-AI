@@ -313,3 +313,112 @@ def launch_blocked(app: str, args: str = "", user_blocked=()) -> str:
     if name in LAUNCH_FORBIDDEN or re.fullmatch(r"python\d[\d.]*|mkfs\.\w+", name):
         return f"launch_app cannot start '{name}' (use run_command, which is checked)"
     return blocked_rule(f"{app} {args}".strip(), user_blocked)
+
+
+# ── code the agent wrote: it may write it, never run it ─────────────────────
+# Code a model wrote can do anything once it runs, whatever it claims to do.
+# Maze AI writes code and checks it statically (codecheck.py); running it is
+# the user's job. These rules block every way of running model-written code.
+_INTERPRETERS = (r"python[\d.]*|pypy[\d.]*|perl|ruby|node|nodejs|php|lua[\d.]*|deno|bun|"
+                 r"osascript|Rscript|julia|tclsh|wish|guile|racket")
+_SHELLS = r"bash|sh|zsh|dash|fish|ksh|mksh|csh|tcsh|busybox"
+INLINE_CODE_RULE = "Running inline code (python -c, bash -c, eval…): Maze AI writes code, you run it"
+WRITTEN_CODE_RULE = "Running code Maze AI wrote or downloaded: it writes code, you run it"
+RUNNER_RULE = ("Running tests, builds or the program after Maze AI changed code: "
+               "it writes code, you run it")
+
+_INLINE = re.compile(
+    rf"{_CMD}(?:\S*/)?(?:{_INTERPRETERS})\s+(?:-\S+\s+)*-(?:c|e|E|r|-eval|-exec|-print)\b"
+    rf"|{_CMD}(?:\S*/)?(?:{_SHELLS})\s+(?:-\S+\s+)*-\w*c\w*\b"
+    rf"|{_CMD}(?:\S*/)?(?:{_INTERPRETERS}|{_SHELLS})\b[^\n|;&]*<<"         # heredoc
+    rf"|\|\s*(?:\S*/)?(?:{_INTERPRETERS}|{_SHELLS})\s*(?:-\s*)?(?:$|[;&|)\n])"  # pipe into it
+    rf"|{_CMD}eval\b|{_CMD}exec\s+\S"
+    r"|\bawk\b[^\n]*(?:system\s*\(|\|\s*getline|\"\s*\|)"
+    r"|\bfind\b[^\n]*-exec(?:dir)?\s+(?:\S*/)?(?:" + _SHELLS + r"|" + _INTERPRETERS + r")\b",
+    re.IGNORECASE,
+)
+
+_RUNNERS = re.compile(
+    _CMD + r"(?:"
+    r"pytest|py\.test|tox|nox|make|gmake|ninja|meson\s+(?:compile|test)|"
+    r"cmake\s+--build|ctest|cargo\s+(?:run|test|build|check|bench|install)|"
+    r"go\s+(?:run|test|build|generate|install)|npm\s+(?:test|t|start|run|exec|install|i|ci)|"
+    r"npx|yarn|pnpm|bunx?|deno\s+(?:run|test|task)|mvn|gradle|\./gradlew|ant|rake|"
+    r"bundle\s+exec|composer\s+(?:run|install)|uvicorn|gunicorn|flask\s+run|"
+    r"(?:python[\d.]*\s+)?-m\s+(?:pytest|unittest|pip\s+install)|"
+    r"pip[\d.]*\s+install\s+(?:-e\s+)?\.|(?:python[\d.]*\s+)?setup\.py|"
+    r"python[\d.]*\s+manage\.py|makepkg|docker\s+(?:build|run|compose)|podman\s+(?:build|run)"
+    r")(?![\w-])",
+    re.IGNORECASE,
+)
+
+
+def _resolve(token: str, cwd: str) -> str:
+    import os
+
+    path = os.path.expanduser(os.path.expandvars(token))
+    if not os.path.isabs(path):
+        path = os.path.join(cwd or os.getcwd(), path)
+    return os.path.normpath(path)
+
+
+def execution_rule(command: str, written=(), cwd: str = "") -> str:
+    """Why this command would run model-written code ("" when it doesn't)."""
+    text = command or ""
+    if _INLINE.search(text):
+        return INLINE_CODE_RULE
+    written = {str(p) for p in written or ()}
+    if not written:
+        return ""
+    if _RUNNERS.search(text):
+        return RUNNER_RULE
+    for tokens in _segments(text):
+        if not tokens:
+            continue
+        candidates = list(tokens)
+        # Wrappers that run their argument: look at what they run.
+        while candidates and candidates[0].rsplit("/", 1)[-1] in (
+                "env", "nohup", "exec", "setsid", "time", "nice", "stdbuf", "timeout"):
+            candidates = [t for t in candidates[1:] if not t.startswith("-")
+                          and "=" not in t] or []
+            if candidates and candidates[0].replace(".", "").isdigit():
+                candidates = candidates[1:]        # `timeout 5 cmd`
+        if not candidates:
+            continue
+        program = candidates[0].rsplit("/", 1)[-1]
+        for i, token in enumerate(candidates):
+            if token.startswith("-") and token != "-m":
+                continue
+            if token == "-m" and i + 1 < len(candidates):
+                module = candidates[i + 1].replace(".", "/")
+                for guess in (f"{module}.py", f"{module}/__main__.py", f"{module}/__init__.py"):
+                    if _resolve(guess, cwd) in written:
+                        return WRITTEN_CODE_RULE
+                continue
+            if _resolve(token, cwd) in written:
+                # Executed directly, or handed to an interpreter / `source`.
+                runs = (i == 0 or re.fullmatch(_INTERPRETERS + "|" + _SHELLS
+                                               + r"|source|\.|exec|xargs", program)
+                        is not None)
+                if runs:
+                    return WRITTEN_CODE_RULE
+    return ""
+
+
+_WRITE_TARGETS = re.compile(
+    r"(?:^|[^<>&\d])>{1,2}\s*([^\s;&|<>]+)"                  # > file, >> file
+    r"|\btee\s+(?:-a\s+)?([^\s;&|<>]+)"
+    r"|\b(?:curl\b[^\n;&|]*?\s-o\s*|wget\b[^\n;&|]*?\s-O\s*)([^\s;&|<>]+)"
+    r"|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*\S+\s+([^\s;&|<>]+)\s*(?:$|[;&|])"
+)
+
+
+def written_by_command(command: str, cwd: str = "") -> list[str]:
+    """Files a shell command (probably) creates or overwrites."""
+    out = []
+    for match in _WRITE_TARGETS.finditer(command or ""):
+        target = next((g for g in match.groups() if g), "")
+        target = target.strip("'\"")
+        if target and target not in ("/dev/null", "-", "&1", "&2"):
+            out.append(_resolve(target, cwd))
+    return out

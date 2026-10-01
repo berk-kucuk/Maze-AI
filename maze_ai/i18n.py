@@ -29,7 +29,6 @@ UI_LANGUAGES: list[tuple[str, str]] = [
 TURKISH: dict[str, str] = {
     # ── title bar ─────────────────────────────────────────────────────────
     "Toggle chat history": "Sohbet geçmişini aç/kapat",
-    "Reminders": "Hatırlatıcılar",
     "Settings": "Ayarlar",
     "Minimize to tray": "Sistem tepsisine küçült",
     "Hide to tray": "Tepsiye gizle",
@@ -152,7 +151,6 @@ TURKISH: dict[str, str] = {
     "Open Maze AI": "Maze AI'ı aç",
     "Quit": "Çıkış",
     "Still running in the tray.": "Sistem tepsisinde çalışmaya devam ediyor.",
-    "Reminder": "Hatırlatma",
     "Show or hide the key": "Anahtarı göster/gizle",
     # ── approval dialog ───────────────────────────────────────────────────
     "Run this command?": "Bu komut çalıştırılsın mı?",
@@ -190,8 +188,8 @@ TURKISH: dict[str, str] = {
     # ── onboarding ────────────────────────────────────────────────────────
     "Welcome to Maze AI": "Maze AI'a hoş geldiniz",
     "Your private, agentic assistant for Maze Linux. It can run commands, "
-    "manage files, launch apps, search the web, take screenshots and set "
-    "reminders — right from this window.\n\n"
+    "manage files, launch apps, search the web, read the screen and chat "
+    "with your folders — right from this window.\n\n"
     "First, choose where the model runs:\n"
     "• **Ollama** — fully local & private (download a model)\n"
     "• **Gemini** or an **OpenAI-compatible** API — hosted, just add a key\n\n"
@@ -199,8 +197,8 @@ TURKISH: dict[str, str] = {
     "destructive commands always require approval.":
         "Maze Linux için gizliliğe saygılı, iş yapabilen asistanınız. Bu "
         "pencereden komut çalıştırabilir, dosyaları yönetebilir, uygulama "
-        "açabilir, web'de arama yapabilir, ekran görüntüsü alabilir ve "
-        "hatırlatıcı kurabilir.\n\n"
+        "açabilir, web'de arama yapabilir, ekranı okuyabilir ve "
+        "klasörlerinizle sohbet edebilir.\n\n"
         "Önce modelin nerede çalışacağını seçin:\n"
         "• **Ollama** — tamamen yerel ve gizli (bir model indirin)\n"
         "• **Gemini** veya **OpenAI uyumlu** bir API — sunucuda, tek gereken "
@@ -209,15 +207,8 @@ TURKISH: dict[str, str] = {
         "her zaman onay ister.",
     "Skip for now": "Şimdilik geç",
     "Choose a backend": "Bir sağlayıcı seç",
-    # ── reminders dialog ──────────────────────────────────────────────────
-    "Remind me to…": "Bana şunu hatırlat…",
-    "in 30 minutes": "30 dakika sonra",
     "Add": "Ekle",
-    "Enter what to be reminded about.": "Neyin hatırlatılacağını yazın.",
-    "Couldn't read the time. Try 'in 10 minutes', '18:30', 'tomorrow 09:00'.":
-        "Zamanı anlayamadım. '10 dakika sonra', '18:30' ya da 'yarın 09:00' deneyin.",
     "Remove": "Kaldır",
-    "No pending reminders.": "Bekleyen hatırlatıcı yok.",
     # ── settings ──────────────────────────────────────────────────────────
     "Backends, models and agent behaviour": "Sağlayıcılar, modeller ve ajan davranışı",
     "AI Backend": "Yapay zekâ sağlayıcısı",
@@ -263,7 +254,6 @@ TURKISH: dict[str, str] = {
     "Web search and fetching pages": "Web araması ve sayfa getirme",
     "Screenshots, OCR, clipboard, notifications":
         "Ekran görüntüsü, OCR, pano, bildirimler",
-    "Reminders and to-dos": "Hatırlatıcılar ve yapılacaklar",
     "No tools — the assistant can only talk.":
         "Araç yok — asistan yalnızca sohbet edebilir.",
     "{count} tools · about {tokens} tokens of context per message":
@@ -435,9 +425,9 @@ TURKISH: dict[str, str] = {
     "Auto  ·  match my system": "Otomatik  ·  sistemimle aynı",
     # ── 1.18: redesigned interface ────────────────────────────────────────
     "How can I help?": "Nasıl yardımcı olabilirim?",
-    "Commands, files, apps, the web and reminders on Maze Linux — "
+    "Commands, files, apps and the web on Maze Linux — "
     "anything that changes your system asks you first.":
-        "Maze Linux'ta komutlar, dosyalar, uygulamalar, web ve hatırlatıcılar — "
+        "Maze Linux'ta komutlar, dosyalar, uygulamalar ve web — "
         "sisteminizi değiştiren her şey önce size sorulur.",
     "Show my disk usage": "Disk kullanımımı göster",
     "Show my disk usage and the biggest folders in my home.":
@@ -447,8 +437,9 @@ TURKISH: dict[str, str] = {
     "Create a Python venv in ~/dev": "~/dev içinde Python venv oluştur",
     "Create a Python virtual environment in ~/dev/venv.":
         "~/dev/venv içinde bir Python sanal ortamı oluştur.",
-    "Remind me to take a break in 30 minutes": "30 dakika sonra mola vermemi hatırlat",
-    "Remind me to take a break in 30 minutes.": "30 dakika sonra mola vermemi hatırlat.",
+    "How do I set up Bluetooth headphones?": "Bluetooth kulaklığı nasıl kurarım?",
+    "How do I set up Bluetooth headphones on Maze Linux?":
+        "Maze Linux'ta Bluetooth kulaklığı nasıl kurarım?",
     "Press {keys} to see every keyboard shortcut.":
         "Tüm klavye kısayollarını görmek için {keys} tuşlarına basın.",
     "{keys} for shortcuts": "Kısayollar: {keys}",
@@ -616,13 +607,100 @@ TURKISH: dict[str, str] = {
     "Summarise the pasted text below in a few bullet points.":
         "Aşağıdaki yapıştırılan metni birkaç madde halinde özetle.",
     "Reply…": "Yanıtla…",
-    "Today {time}": "Bugün {time}",
-    "Tomorrow {time}": "Yarın {time}",
-    "Couldn't read the time yet…": "Zaman henüz anlaşılamadı…",
     "Turkish": "Türkçe", "English": "İngilizce", "German": "Almanca",
     "French": "Fransızca", "Spanish": "İspanyolca", "Italian": "İtalyanca",
     "Portuguese": "Portekizce", "Russian": "Rusça", "Arabic": "Arapça",
     "Chinese": "Çince", "Japanese": "Japonca",
+    # ── docs, memory, model recommendation ─────────────────────────────────
+    "Arch Wiki and manual pages (checks facts before answering)":
+        "Arch Wiki ve kılavuz sayfaları (yanıtlamadan önce bilgiyi doğrular)",
+    "Remembering things about you across chats": "Sohbetler arasında sizinle ilgili şeyleri hatırlama",
+    "WHAT MAZE AI REMEMBERS ABOUT YOU": "MAZE AI'IN SİZİNLE İLGİLİ HATIRLADIKLARI",
+    "Nothing yet. Say “remember that I use the fish shell” in a chat, or "
+    "write notes here — one per line.":
+        "Henüz bir şey yok. Sohbette “fish kabuğu kullandığımı hatırla” deyin ya da "
+        "notları buraya yazın — her satıra bir tane.",
+    "Added to every chat as background. Stored only on this computer; "
+    "passwords and keys are never saved.":
+        "Her sohbete arka plan bilgisi olarak eklenir. Yalnızca bu bilgisayarda "
+        "saklanır; parola ve anahtarlar asla kaydedilmez.",
+    "Summarise older messages in long chats instead of forgetting them":
+        "Uzun sohbetlerde eski mesajları unutmak yerine özetle",
+    "When a chat no longer fits in the model's context, the oldest messages "
+    "are condensed into a short summary. Costs one extra model call now and "
+    "then.":
+        "Sohbet modelin bağlamına sığmadığında en eski mesajlar kısa bir özete "
+        "dönüştürülür. Ara sıra bir ek model çağrısı yapar.",
+    "Not saved to memory (too long, or looks like a secret): {notes}":
+        "Hafızaya kaydedilmedi (çok uzun ya da gizli bilgiye benziyor): {notes}",
+    "it saves a lasting note right after reading outside content: {detail}":
+        "dış bir içerik okunduktan hemen sonra kalıcı bir not kaydediyor: {detail}",
+    "fits entirely in your GPU": "tamamen GPU'nuza sığıyor",
+    "fast enough without a GPU": "GPU olmadan da yeterince hızlı",
+    "✓ {model} is the best fit for this machine ({where}).":
+        "✓ {model} bu makine için en uygun model ({where}).",
+    "Recommended for this machine: {model} — installed, {where}.":
+        "Bu makine için önerilen: {model} — kurulu, {where}.",
+    "Recommended for this machine: {model} ({size} download) — {where}.":
+        "Bu makine için önerilen: {model} ({size} indirme) — {where}.",
+    "Use it": "Kullan",
+    "Selected {model}. Save to switch to it.": "{model} seçildi. Geçmek için Kaydet'e basın.",
+    "Switch to {model}": "{model} modeline geç",
+    "{current} doesn't fit in your GPU and partly runs on the CPU. "
+    "{model} is installed and fits entirely, so it answers several "
+    "times faster.":
+        "{current} GPU'nuza sığmıyor ve kısmen CPU'da çalışıyor. {model} kurulu ve "
+        "tamamen sığıyor, bu yüzden birkaç kat daha hızlı yanıt verir.",
+    "Now using {model}.": "Artık {model} kullanılıyor.",
+    "WHAT IT DOES  ·  from the manual pages on this computer":
+        "NE YAPAR  ·  bu bilgisayardaki kılavuz sayfalarından",
+    "Reading the manual…": "Kılavuz okunuyor…",
+    "Apply to file": "Dosyaya uygula",
+    "Write this code into a file (you see the change before anything is saved)":
+        "Bu kodu bir dosyaya yaz (kaydetmeden önce değişikliği görürsünüz)",
+    "Apply code to file": "Kodu dosyaya uygula",
+    "… {count} more lines": "… {count} satır daha",
+    "This code doesn't parse, so it won't be saved: {error}":
+        "Bu kod ayrıştırılamıyor, bu yüzden kaydedilmeyecek: {error}",
+    "The current version is backed up and can be restored.":
+        "Mevcut sürüm yedeklenir ve geri yüklenebilir.",
+    "Write this code to {name}?": "Bu kod {name} dosyasına yazılsın mı?",
+    "Write file": "Dosyaya yaz",
+    "Saved to {path}": "{path} dosyasına kaydedildi",
+    "{model} answers this coding question.": "Bu kodlama sorusunu {model} yanıtlıyor.",
+    "For programming: {model} is installed and used for coding questions.":
+        "Programlama için: {model} kurulu ve kodlama sorularında kullanılıyor.",
+    "For programming: {model} ({size} download) writes better code than a general model.":
+        "Programlama için: {model} ({size} indirme) genel bir modelden daha iyi kod yazar.",
+    "Answer programming questions with an installed coding model":
+        "Programlama sorularını kurulu bir kodlama modeliyle yanıtla",
+    "When a coding model such as qwen2.5-coder is installed and fits your GPU, "
+    "it answers questions about code; everything else stays on your main model.":
+        "qwen2.5-coder gibi bir kodlama modeli kurulu ve GPU'nuza sığıyorsa kod "
+        "sorularını o yanıtlar; diğer her şey ana modelinizde kalır.",
+    "Click to detach the folder from this chat": "Klasörü bu sohbetten ayırmak için tıklayın",
+    "Chat with a folder: Maze AI reads its files to answer":
+        "Klasörle sohbet: Maze AI cevaplamak için dosyalarını okur",
+    "Choose a folder to chat with": "Sohbet edilecek klasörü seçin",
+    "Pick a project or documents folder, not your whole home or the system.":
+        "Ev klasörünüzün tamamını ya da sistemi değil, bir proje veya belge klasörü seçin.",
+    "Folder detached from this chat.": "Klasör bu sohbetten ayrıldı.",
+    "{name} · indexing…": "{name} · dizinleniyor…",
+    "{name} · reading files {done}/{total}": "{name} · dosyalar okunuyor {done}/{total}",
+    "{name} · understanding {pct}%": "{name} · anlamlandırılıyor %{pct}",
+    "{name} · indexing failed": "{name} · dizinleme başarısız",
+    "{name} · {files} files": "{name} · {files} dosya",
+    "{files} text files indexed in {folder}. Ask anything about them.":
+        "{folder} içinde {files} metin dosyası dizinlendi. Onlar hakkında her şeyi sorabilirsiniz.",
+    "Tip: install an embedding model for search that understands meaning, "
+    "not just words: ollama pull embeddinggemma":
+        "İpucu: Yalnızca kelimeleri değil anlamı da anlayan arama için bir gömme modeli "
+        "kurun: ollama pull embeddinggemma",
+    "The folder is large; only the first part was indexed.":
+        "Klasör büyük; yalnızca ilk kısmı dizinlendi.",
+    "{current} can't see images, so {model} answers this message.":
+        "{current} görselleri göremiyor, bu mesajı {model} yanıtlıyor.",
+    "No manual page explains this command.": "Bu komutu açıklayan bir kılavuz sayfası yok.",
     # ── command rules ─────────────────────────────────────────────────────
     "Command rules": "Komut kuralları",
     "What the assistant may never run, must always ask about, and may run "

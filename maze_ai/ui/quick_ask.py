@@ -32,7 +32,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QGuiApplication, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QCursor, QGuiApplication, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -50,7 +50,7 @@ from ..config import Config
 from ..i18n import current_language, tr
 from . import icons
 from .approval import ApprovalDialog
-from .chat_view import ErrorCard, _Bubble
+from .chat_view import ErrorCard, _Bubble, add_applied_listener, notice_text
 from .dialogs import keycap, shortcut_text
 from .effects import MARGIN as CARD_MARGIN
 from .effects import AuroraCard, GlowDot, TypingDots
@@ -62,7 +62,7 @@ from .theme import (
     FONT_MONO,
     LINE,
     LINE_HI,
-    LOGO_PATH,
+    LOGO_SMALL_PATH,
     OK,
     STYLESHEET,
     TEXT,
@@ -247,6 +247,7 @@ class QuickAsk(QDialog):
         super().__init__(parent)
         self.config = config
         self.agent = Agent.from_config(config)
+        add_applied_listener(lambda path: self.agent.mark_written(path))
         self.worker: AgentWorker | None = None
         self._grow: QPropertyAnimation | None = None
         self._fade: QPropertyAnimation | None = None
@@ -399,7 +400,7 @@ class QuickAsk(QDialog):
         head.setContentsMargins(2, 0, 0, 0)
         head.setSpacing(8)
         avatar = QLabel()
-        pix = QPixmap(LOGO_PATH)
+        pix = QPixmap(LOGO_SMALL_PATH)
         if not pix.isNull():
             scaled = pix.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio,
                                 Qt.TransformationMode.SmoothTransformation)
@@ -585,7 +586,7 @@ class QuickAsk(QDialog):
             return
         self._context_text, self._context_pending = "", False
         first = Path(paths[0])
-        vision = getattr(self.agent.backend, "supports_vision", False)
+        vision = self.agent.can_see()
         images = [p for p in paths if Path(p).suffix.lower() in self.IMAGE_SUFFIXES]
 
         listed = " ".join(f'"{p}"' if " " in p else p for p in paths)
@@ -625,7 +626,7 @@ class QuickAsk(QDialog):
         self._images = [path]
         self._show_context("image", tr("Screen capture"), Path(path).name)
         self._resize_to(self.width(), self._empty_height + 90)
-        vision = getattr(self.agent.backend, "supports_vision", False)
+        vision = self.agent.can_see()
         self.composer.setPlainText(
             tr("What does this show?") if vision
             else tr("Read the text in this image and explain it.")
@@ -675,10 +676,36 @@ class QuickAsk(QDialog):
     def _set_activity(self, text: str) -> None:
         self.activity.setText(text)
 
+    def _height_limit(self) -> int:
+        """The tallest this window may get on the screen it is actually on.
+
+        Not ``screenAt(self.pos())``: on Wayland an app never learns its own
+        position, so that asked the primary monitor — a 1440p limit applied to
+        a window open on a 1080p screen, which ran off the bottom. The window's
+        own screen is reported correctly on both Wayland and X11.
+
+        The compositor decides where a Wayland window goes (KWin centres it)
+        and keeps its top edge while it grows, so the room below is roughly
+        half the screen plus the height it opened at. On X11 the real top edge
+        is known and used instead.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return 620
+        area = screen.availableGeometry()
+        limit = int(area.height() * 0.7)
+        if QGuiApplication.platformName().startswith("wayland"):
+            opened = getattr(self, "_opened_height", 0) or self._empty_height
+            limit = min(limit, (area.height() + opened) // 2 - 24)
+        else:
+            top = self.geometry().top()
+            if area.top() <= top < area.bottom():
+                limit = min(limit, area.bottom() - top - 24)
+        return max(self._empty_height, limit)
+
     def _wanted_height(self) -> tuple[int, int]:
         """(height the answer needs, the most the screen allows)."""
-        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
-        limit = int(screen.availableGeometry().height() * 0.7) if screen else 620
+        limit = self._height_limit()
         viewport = max(1, self.answer_area.viewport().width())
         content = self.answer_holder.heightForWidth(viewport)
         if content <= 0:
@@ -697,8 +724,7 @@ class QuickAsk(QDialog):
         A one-line answer in a half-empty 460 px window looks unfinished; a long
         one should not run off the bottom of the display.
         """
-        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
-        limit = int(screen.availableGeometry().height() * 0.7) if screen else 620
+        limit = self._height_limit()
         # heightForWidth, not sizeHint: a word-wrapped label's size hint assumes
         # a much narrower box and comes out more than twice too tall, which
         # would leave the window padded with empty space under short answers.
@@ -712,6 +738,11 @@ class QuickAsk(QDialog):
 
     def _resize_to(self, width: int, height: int, shrink: bool = False) -> None:
         """Grow (or settle) to fit new content, gliding rather than jumping."""
+        # Every growth path ends here, so this is where the screen cap holds:
+        # past it, the conversation scrolls inside the window instead.
+        limit = self._height_limit()
+        self.setMaximumHeight(limit)
+        height = min(height, limit)
         if not shrink and self.height() >= height:
             return
         if abs(self.height() - height) < 8:
@@ -878,6 +909,8 @@ class QuickAsk(QDialog):
             self.answer_area.show()
         elif ev.kind == "tool_call":
             self._set_activity(tr("Running {tool}…").format(tool=ev.tool))
+        elif ev.kind == "notice":
+            self._set_activity(notice_text(ev))
         elif ev.kind == "blocked":
             self._set_activity(tr("Blocked by the safety rules: {rule}").format(rule=tr(ev.text)))
         elif ev.kind in ("thought", "thinking"):
@@ -982,7 +1015,9 @@ class QuickAsk(QDialog):
             # Every summons starts a new conversation; inside one, the user
             # can keep replying until the window is closed.
             self.reset()
-        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
+        # Open where the user is looking: the monitor under the cursor.
+        screen = (QGuiApplication.screenAt(QCursor.pos()) or self.screen()
+                  or QGuiApplication.primaryScreen())
         if screen is not None and not was_visible:
             area = screen.availableGeometry()
             self.move(
@@ -994,6 +1029,8 @@ class QuickAsk(QDialog):
             # A short fade reads as "summoned", not "a window popped up".
             self.setWindowOpacity(0.0)
         self.show()
+        if not was_visible:
+            self._opened_height = self.height()
         self.raise_()
         self.activateWindow()
         self.composer.setFocus()

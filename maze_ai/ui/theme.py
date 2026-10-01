@@ -13,6 +13,9 @@ from pathlib import Path
 
 RESOURCES = Path(__file__).resolve().parent.parent / "resources"
 LOGO_PATH = str(RESOURCES / "logo.png")
+#: The same mark simplified for 16-32 px (tray, avatars): one ring, thick
+#: strokes, no glow — the full logo turns to mush at that size.
+LOGO_SMALL_PATH = str(RESOURCES / "logo-small.png")
 # QSS needs files for its images; forward slashes work on every platform.
 _CHEVRON = (RESOURCES / "chevron-down.svg").as_posix()
 _CHECK = (RESOURCES / "check.svg").as_posix()

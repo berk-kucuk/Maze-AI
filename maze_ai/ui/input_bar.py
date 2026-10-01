@@ -123,6 +123,9 @@ class InputBar(QFrame):
     #: Emitted when files are dropped that aren't images — the composer gets
     #: their paths so the agent can read them.
     files_dropped = Signal(list)
+    #: The folder button was pressed / the folder chip asks to detach.
+    folder_requested = Signal()
+    folder_detach = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -147,6 +150,16 @@ class InputBar(QFrame):
         self.attach_label.clicked.connect(self.clear_attachments)
         self.attach_label.hide()
         outer.addWidget(self.attach_label, 0, Qt.AlignmentFlag.AlignLeft)
+
+        # The folder attached to this chat, and how its indexing is going.
+        self.folder_chip = QPushButton("")
+        self.folder_chip.setObjectName("chip")
+        self.folder_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.folder_chip.setIcon(icons.icon("folder", TEXT_DIM, 14))
+        self.folder_chip.setToolTip(tr("Click to detach the folder from this chat"))
+        self.folder_chip.clicked.connect(self.folder_detach.emit)
+        self.folder_chip.hide()
+        outer.addWidget(self.folder_chip, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.composer = _Composer()
         self.composer.setStyleSheet(
@@ -174,6 +187,17 @@ class InputBar(QFrame):
         self.attach_btn.setFixedSize(32, 32)
         self.attach_btn.clicked.connect(self.attach)
         bar.addWidget(self.attach_btn)
+
+        self.folder_btn = QToolButton()
+        self.folder_btn.setObjectName("icon")
+        self.folder_btn.setIcon(icons.icon("folder", TEXT_DIM, 18, hover=TEXT, disabled="#3a3a42"))
+        self.folder_btn.setIconSize(QSize(18, 18))
+        self.folder_btn.setToolTip(tr("Chat with a folder: Maze AI reads its files to answer"))
+        self.folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.folder_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.folder_btn.setFixedSize(32, 32)
+        self.folder_btn.clicked.connect(self.folder_requested.emit)
+        bar.addWidget(self.folder_btn)
         bar.addStretch(1)
 
         self.hint = plain_label(tr("Enter to send · Shift+Enter for a new line"))
@@ -329,6 +353,16 @@ class InputBar(QFrame):
         items = list(self._attachments)
         self.clear_attachments()
         return items
+
+    def set_folder(self, text: str, tooltip: str = "") -> None:
+        """Show the attached folder ("" hides the chip)."""
+        if not text:
+            self.folder_chip.hide()
+            return
+        self.folder_chip.setText(f" {text}   ✕")
+        if tooltip:
+            self.folder_chip.setToolTip(tooltip)
+        self.folder_chip.show()
 
     def _refresh_attach_label(self) -> None:
         n = len(self._attachments)

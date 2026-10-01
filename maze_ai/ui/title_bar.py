@@ -28,7 +28,6 @@ class TitleBar(QWidget):
     close_clicked = Signal()
     settings_clicked = Signal()
     sidebar_clicked = Signal()
-    reminders_clicked = Signal()
     shortcuts_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -64,12 +63,6 @@ class TitleBar(QWidget):
         self.badge.clicked.connect(self.settings_clicked.emit)
         layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addSpacing(6)
-
-        self.reminders_btn = self._icon_button(
-            "alarm", with_shortcut(tr("Reminders"), "Ctrl+Shift+R")
-        )
-        self.reminders_btn.clicked.connect(self.reminders_clicked.emit)
-        layout.addWidget(self.reminders_btn)
 
         self.shortcuts_btn = self._icon_button(
             "keyboard", with_shortcut(tr("Keyboard shortcuts"), "Ctrl+/")

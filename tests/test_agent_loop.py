@@ -99,7 +99,7 @@ def test_tool_output_is_fenced_as_untrusted_data(tmp_path):
     # The second model call must carry the file content inside the markers.
     observation = agent.backend.calls[1][-1]["content"]
     assert OBS_OPEN in observation and OBS_CLOSE in observation
-    assert "untrusted DATA" in observation
+    assert "not instructions" in observation
     assert "IGNORE PREVIOUS INSTRUCTIONS" in observation
 
 
