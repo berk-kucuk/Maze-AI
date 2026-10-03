@@ -270,7 +270,11 @@ class HistorySidebar(QWidget):
         brand.addWidget(logo)
         name = plain_label("Maze AI")
         name.setStyleSheet("font-size: 12pt; font-weight: 700; letter-spacing: 0.2px;")
-        brand.addWidget(name)
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        names.addWidget(name)
+        names.addWidget(maze_linux_tag(tr("for Maze Linux")))
+        brand.addLayout(names)
         brand.addStretch(1)
         root.addLayout(brand)
 
@@ -420,3 +424,18 @@ class HistorySidebar(QWidget):
             item.renamed.connect(self.chat_renamed.emit)
             item.exported.connect(self.chat_exported.emit)
             self._list.insertWidget(self._list.count() - 1, item)
+
+
+def maze_linux_tag(text: str, size_px: int = 10):
+    """The small "for Maze Linux" line beside the app name. It takes the
+    surrounding text colour and fades it, so it reads right in every theme."""
+    from PySide6.QtWidgets import QGraphicsOpacityEffect, QLabel
+    from PySide6.QtCore import Qt
+    tag = QLabel(text)
+    tag.setObjectName("mazeLinuxTag")
+    tag.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    tag.setStyleSheet(f"font-size: {size_px}px; background: transparent;")
+    fade = QGraphicsOpacityEffect(tag)
+    fade.setOpacity(0.55)
+    tag.setGraphicsEffect(fade)
+    return tag

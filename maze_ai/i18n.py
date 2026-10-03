@@ -34,6 +34,7 @@ TURKISH: dict[str, str] = {
     "Hide to tray": "Tepsiye gizle",
     # ── sidebar ───────────────────────────────────────────────────────────
     "New chat": "Yeni sohbet",
+    "for Maze Linux": "Maze Linux için",
     "Search chats…": "Sohbetlerde ara…",
     "HISTORY": "GEÇMİŞ",
     "No saved chats yet.": "Henüz kayıtlı sohbet yok.",

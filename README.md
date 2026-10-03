@@ -310,6 +310,8 @@ Bug reports, feature requests, and pull requests are welcome. Please open an iss
 
 ## License
 
+Copyright © 2026 Berk Küçük
+
 GPL-3.0 or later. See [LICENSE](LICENSE) for details.
 
 ## Author
