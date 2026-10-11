@@ -57,7 +57,8 @@ _END = r"(?=\s|$|[;&|)\"'])"
 
 BLOCKED_RULES: list[Rule] = [
     Rule("root", "Gaining root (sudo, su, doas, pkexec, run0)",
-         _rx(_CMD + r"(?:sudo|su|doas|pkexec|run0)\b")),
+         # `(?:\S*/)?`: a path-qualified `/usr/bin/sudo` is the same program.
+         _rx(_CMD + r"(?:\S*/)?(?:sudo|su|doas|pkexec|run0)\b")),
     Rule("wipe-critical", "Deleting the whole system or home folder",
          _rx(_CMD + r"rm\b[^;&|\n]*\s(?:-\w*[rR]\w*|--recursive)\b[^;&|\n]*\s" + _CRITICAL + _END
              + r"|--no-preserve-root")),
@@ -328,10 +329,14 @@ RUNNER_RULE = ("Running tests, builds or the program after Maze AI changed code:
                "it writes code, you run it")
 
 _INLINE = re.compile(
-    rf"{_CMD}(?:\S*/)?(?:{_INTERPRETERS})\s+(?:-\S+\s+)*-(?:c|e|E|r|-eval|-exec|-print)\b"
+    # Short options cluster: `python3 -Bc`, `perl -pe`, `node -pe` carry the
+    # code flag at the END of the cluster, not as a token of its own.
+    rf"{_CMD}(?:\S*/)?(?:{_INTERPRETERS})\s+(?:-\S+\s+)*"
+    rf"(?:-[A-Za-z]*[ceE]|-r|--eval|--exec|--print)\b"
     rf"|{_CMD}(?:\S*/)?(?:{_SHELLS})\s+(?:-\S+\s+)*-\w*c\w*\b"
     rf"|{_CMD}(?:\S*/)?(?:{_INTERPRETERS}|{_SHELLS})\b[^\n|;&]*<<"         # heredoc
-    rf"|\|\s*(?:\S*/)?(?:{_INTERPRETERS}|{_SHELLS})\s*(?:-\s*)?(?:$|[;&|)\n])"  # pipe into it
+    # Pipe into it, with or without flags (`| bash -s`, `| python3 -`).
+    rf"|\|\s*(?:\S*/)?(?:{_INTERPRETERS}|{_SHELLS})\b(?:\s+-\S*)*\s*(?:$|[;&|)\n])"
     rf"|{_CMD}eval\b|{_CMD}exec\s+\S"
     r"|\bawk\b[^\n]*(?:system\s*\(|\|\s*getline|\"\s*\|)"
     r"|\bfind\b[^\n]*-exec(?:dir)?\s+(?:\S*/)?(?:" + _SHELLS + r"|" + _INTERPRETERS + r")\b",

@@ -59,7 +59,7 @@ def is_dangerous_command(command: str) -> bool:
 _READONLY_CMDS = {
     "ls", "cat", "pwd", "whoami", "id", "df", "du", "free", "uptime", "date",
     "head", "tail", "wc", "stat", "file", "uname", "lscpu", "lsblk", "lsusb",
-    "lspci", "ps", "which", "whereis", "printenv", "cal", "hostname",
+    "lspci", "ps", "which", "whereis", "cal", "hostname",
     "echo", "printf", "tree", "realpath", "dirname", "basename", "nproc",
     "arch", "groups", "locale", "getent", "neofetch", "fastfetch", "sensors",
     "true", "test",
@@ -71,7 +71,8 @@ _READONLY_CMDS = {
 # NOT in the list, on purpose: `env`. It reads the environment when called with
 # no arguments, but its actual job is running a program — `env <anything>` is
 # arbitrary execution wearing a read-only name, which made it a way past this
-# whole function. `printenv` covers the legitimate use.
+# whole function. `printenv` is not here either: the environment is where API
+# keys live, so dumping it is a secret read and goes through approval.
 
 # Flags that turn one of the commands above into something that WRITES a file
 # or RUNS code. Deliberately per-command rather than one global list: `-o` is a
@@ -285,12 +286,61 @@ _SENSITIVE_PATTERNS = [
     r"(^|/)\.config/fish/config\.fish$",
     r"(^|/)\.config/autostart(/|$)",
     r"(^|/)\.config/systemd/user(/|$)",
-    r"(^|/)\.config/plasma-workspace/env(/|$)",
+    r"(^|/)\.config/plasma-workspace/(env|shutdown)(/|$)",
+    r"(^|/)\.config/autostart-scripts(/|$)",
+    r"(^|/)\.config/environment\.d(/|$)",
+    r"(^|/)\.config/fish/conf\.d(/|$)",
+    r"(^|/)\.(zlogin|zlogout|bash_logout|xprofile|xinitrc|xsession|xsessionrc)$",
+    r"(^|/)\.local/bin(/|$)",
+    r"(^|/)\.local/share/applications(/|$)",
+    r"(^|/)\.gitconfig$",
+    r"(^|/)\.config/git/config$",
+    r"(^|/)\.git/(hooks(/|$)|config$)",
+    # The process environment holds API keys as often as any dotfile does.
+    r"^/proc/(self|\d+)/environ$",
     # The backup store is the undo history itself. Editing its index is how you
     # would make a deletion unrecoverable without anyone noticing.
     r"(^|/)\.local/share/maze-ai/backups(/|$)",
 ]
 _SENSITIVE_RE = re.compile("|".join(_SENSITIVE_PATTERNS), re.IGNORECASE)
+
+# Shell glob metacharacters. A path spelled with them (`~/.s[s]h/id_*`) never
+# matches the patterns above as text, so it is expanded against the real disk.
+_GLOB_CHARS = re.compile(r"[*?\[]")
+# Bound the work a single check may do when expanding a glob.
+_GLOB_LIMIT = 256
+
+
+def _path_forms(text: str) -> list[str]:
+    """Every spelling of a path worth matching: as written, with ~ and $VARS
+    expanded, normalised (``./`` and ``../`` folded), symlinks resolved, and —
+    when it contains glob characters — each file the glob expands to.
+
+    The sensitivity regexes are lexical. Without this, ``~/.config/./autostart``
+    or ``~/.config/maze-ai/../maze-ai/config.json`` or a symlink pointing at
+    ``~/.ssh/id_ed25519`` all reached the same file under a name no pattern
+    recognised.
+    """
+    import glob as _glob
+
+    forms = [text]
+    expanded = os.path.expanduser(os.path.expandvars(text))
+    forms.append(expanded)
+    candidates = [expanded]
+    if _GLOB_CHARS.search(expanded):
+        try:
+            matches = _glob.glob(expanded)
+        except (OSError, ValueError, re.error):
+            matches = []
+        candidates.extend(matches[:_GLOB_LIMIT])
+    for cand in candidates:
+        norm = os.path.normpath(cand)
+        forms.append(norm)
+        try:
+            forms.append(os.path.realpath(norm))
+        except (OSError, ValueError):
+            pass
+    return forms
 
 
 def is_sensitive_path(path: str | os.PathLike[str]) -> bool:
@@ -298,22 +348,37 @@ def is_sensitive_path(path: str | os.PathLike[str]) -> bool:
     text = str(path or "")
     if not text:
         return False
-    expanded = os.path.expanduser(os.path.expandvars(text))
-    return bool(_SENSITIVE_RE.search(expanded) or _SENSITIVE_RE.search(text))
+    return any(_SENSITIVE_RE.search(form) for form in _path_forms(text))
 
 
 def touches_sensitive_path(command: str) -> str:
     """Return the sensitive fragment a command references, or "" if none.
 
-    Works on the raw command line (rather than parsed arguments) so it also
-    catches paths hidden inside pipelines, quotes and globs.
+    Works on the raw command line and on every word in it, each canonicalised
+    by :func:`_path_forms`, so quoting (``~/.s''sh``), globs, ``$HOME``,
+    ``./``/``../`` segments and symlinks cannot hide the file being read.
     """
     text = (command or "")
     if not text:
         return ""
     expanded = os.path.expanduser(text)
     match = _SENSITIVE_RE.search(expanded) or _SENSITIVE_RE.search(text)
-    return match.group(0) if match else ""
+    if match:
+        return match.group(0)
+    try:
+        words = shlex.split(text, comments=False, posix=True)
+    except ValueError:
+        words = text.split()
+    for word in words:
+        # Strip redirection/assignment prefixes so `<file` and `X=file` count.
+        word = word.lstrip("<>").split("=", 1)[-1] if "=" in word else word.lstrip("<>")
+        if not word or word.startswith("-"):
+            continue
+        for form in _path_forms(word):
+            hit = _SENSITIVE_RE.search(form)
+            if hit:
+                return hit.group(0)
+    return ""
 
 
 # ── URLs ──────────────────────────────────────────────────────────────────
@@ -379,6 +444,12 @@ def check_url(url: str, *, resolve: bool = True) -> str:
 # out" and needs the user's explicit blessing.
 _EXFIL_QUERY_CHARS = 96
 _EXFIL_VALUE_CHARS = 64
+# Splitting a payload over many short path segments or subdomain labels slipped
+# under the per-part limits, so the totals are bounded too.
+_EXFIL_PATH_CHARS = 200
+_EXFIL_PATH_SEGMENTS = 12
+_EXFIL_HOST_CHARS = 80
+_EXFIL_LABEL_CHARS = 40
 
 
 def looks_like_exfiltration(url: str) -> bool:
@@ -400,7 +471,17 @@ def looks_like_exfiltration(url: str) -> bool:
         if len(value) > _EXFIL_VALUE_CHARS:
             return True
     # A very long opaque path segment (base64 blob) counts too.
-    return any(len(seg) > 120 for seg in parsed.path.split("/"))
+    if any(len(seg) > 120 for seg in parsed.path.split("/")):
+        return True
+    # ...and so does the same blob cut into many short pieces, in the path or
+    # in the host name (one DNS label per chunk).
+    segments = [s for s in parsed.path.split("/") if s]
+    if len(parsed.path) > _EXFIL_PATH_CHARS or len(segments) > _EXFIL_PATH_SEGMENTS:
+        return True
+    host = parsed.hostname or ""
+    if len(host) > _EXFIL_HOST_CHARS:
+        return True
+    return any(len(label) > _EXFIL_LABEL_CHARS for label in host.split("."))
 
 
 # ── protected paths ───────────────────────────────────────────────────────

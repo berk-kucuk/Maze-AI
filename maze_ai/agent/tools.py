@@ -22,7 +22,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 
@@ -86,6 +86,8 @@ EGRESS_TOOLS = {"fetch_url"}
 # Maximum bytes fetch_url will pull down before giving up — a model-chosen URL
 # must never be able to pull a multi-gigabyte file into memory.
 MAX_FETCH_BYTES = 5_000_000
+# Redirect hops fetch_url will follow, each one re-checked by check_url.
+MAX_FETCH_REDIRECTS = 5
 
 MAX_OUTPUT = 12_000  # chars of command output fed back to the model
 
@@ -664,22 +666,41 @@ def fetch_url(url: str = "", save_path: str = "", raw: bool = False, **_) -> Too
         log.warning("blocked fetch_url: %s", problem)
         return ToolResult(False, problem)
 
-    try:
-        resp = requests.get(
-            url,
-            timeout=30,
-            stream=True,
-            allow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) MazeAI/1.0"},
-        )
-    except requests.RequestException as exc:
-        return ToolResult(False, f"Could not fetch {url}: {exc}")
-    # A redirect can land somewhere the first check would have refused.
-    if resp.url != url:
-        problem = check_url(resp.url)
+    # Redirects are followed by hand so that EVERY hop is checked before it is
+    # requested. With allow_redirects=True, requests had already sent the GET to
+    # a 302 target like http://127.0.0.1:11434/ by the time the final URL could
+    # be inspected, and a chain that went through an internal host and ended on
+    # a public one was never inspected at all.
+    current = url
+    resp = None
+    for _hop in range(MAX_FETCH_REDIRECTS + 1):
+        try:
+            resp = requests.get(
+                current,
+                timeout=30,
+                stream=True,
+                allow_redirects=False,
+                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) MazeAI/1.0"},
+            )
+        except requests.RequestException as exc:
+            return ToolResult(False, f"Could not fetch {current}: {exc}")
+        if not resp.is_redirect:
+            break
+        location = resp.headers.get("Location", "")
+        resp.close()
+        if not location:
+            return ToolResult(False, f"HTTP {resp.status_code} redirect without a target from {current}.")
+        nxt = urljoin(current, location)
+        problem = check_url(nxt)
         if problem:
-            resp.close()
+            log.warning("blocked fetch_url redirect: %s", problem)
             return ToolResult(False, f"Redirected to a blocked address: {problem}")
+        current = nxt
+    else:
+        if resp is not None:
+            resp.close()
+        return ToolResult(False, f"Too many redirects fetching {url}.")
+    url = current
     if resp.status_code != 200:
         resp.close()
         return ToolResult(False, f"HTTP {resp.status_code} fetching {url}.")
@@ -1047,12 +1068,20 @@ def search_files(path: str = ".", pattern: str = "", max_results: int = 50, **_)
     files = [root] if root.is_file() else _walk_files(root, _SKIP_DIRS)
     deadline = time.monotonic() + SEARCH_SECONDS
     timed_out = False
+    skipped_secret = 0
     for fp in files:
         if len(hits) >= max_results:
             break
         if time.monotonic() > deadline:
             timed_out = True
             break
+        # The approval check only saw the search ROOT. A recursive search from
+        # ~ must not read ~/.ssh or the API-key config on the way past, and a
+        # symlink inside the tree must not lead there either (is_sensitive_path
+        # resolves it).
+        if is_sensitive_path(fp):
+            skipped_secret += 1
+            continue
         try:
             if not fp.is_file() or fp.stat().st_size > SEARCH_MAX_FILE_BYTES:
                 continue
@@ -1071,6 +1100,9 @@ def search_files(path: str = ".", pattern: str = "", max_results: int = 50, **_)
         f"\n[Stopped after {SEARCH_SECONDS}s — narrow the path to search the rest.]"
         if timed_out else ""
     )
+    if skipped_secret:
+        stopped += (f"\n[Skipped {skipped_secret} file(s) holding keys, credentials or "
+                    f"startup configuration — read those with read_file, which asks first.]")
     if not hits:
         return ToolResult(True, f"No matches for /{pattern}/ under {root}.{stopped}")
     body = "\n".join(hits)
@@ -1090,7 +1122,9 @@ def _walk_files(root: Path, skip: set[str]):
     which on a home directory means minutes of I/O for nothing.
     """
     for base, dirs, names in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in skip)
+        # Secret directories (~/.ssh, ~/.gnupg…) are not walked into at all.
+        dirs[:] = sorted(d for d in dirs
+                         if d not in skip and not is_sensitive_path(os.path.join(base, d)))
         for name in sorted(names):
             yield Path(base) / name
 

@@ -173,6 +173,14 @@ class FolderIndex:
         self.db.close()
 
     # ── walking the folder ───────────────────────────────────────────────
+    def _inside_root(self, path: Path) -> bool:
+        """True if ``path`` (with symlinks resolved) is inside the attached folder."""
+        try:
+            real = path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return False
+        return real == self.root or self.root in real.parents
+
     def _candidates(self) -> tuple[dict[str, tuple[float, int]], int, bool]:
         """{relative path: (mtime, size)} of indexable files, skipped count, truncated."""
         found: dict[str, tuple[float, int]] = {}
@@ -184,6 +192,13 @@ class FolderIndex:
             for name in sorted(names):
                 path = Path(base) / name
                 if name.startswith(".") and name not in (".bashrc", ".zshrc"):
+                    continue
+                # An attached folder can come from anywhere (a cloned repo keeps
+                # symlinks). A link pointing outside the folder would put the
+                # target — ~/.ssh/id_rsa, the API-key config — into the index
+                # and from there into the model's prompt.
+                if not self._inside_root(path):
+                    skipped += 1
                     continue
                 try:
                     stat = path.stat()
@@ -235,6 +250,10 @@ class FolderIndex:
             if cancelled and cancelled():
                 break
             path = self.root / rel
+            # Re-checked at read time: the tree may have changed since the walk.
+            if not self._inside_root(path) or is_sensitive_path(path):
+                skipped += 1
+                continue
             if not _is_text(path):
                 skipped += 1
                 db.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?)", (rel, *found[rel]))
