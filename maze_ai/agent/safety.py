@@ -97,7 +97,44 @@ _UNSAFE_FLAGS: dict[str, set[str]] = {
     # writes a file; --textconv (explicit) runs conversion drivers. None of
     # them is needed for reading.
     "git":       {"--ext-diff", "--output", "--textconv"},
+    # journalctl reads logs, except for the maintenance flags that delete,
+    # rotate, move or re-key them.
+    "journalctl": {"--vacuum-size", "--vacuum-time", "--vacuum-files", "--rotate",
+                   "--flush", "--sync", "--relinquish-var", "--smart-relinquish-var",
+                   "--setup-keys", "--update-catalog"},
 }
+
+# Commands that read with flags alone but WRITE once given a plain word:
+# `uniq IN OUT` overwrites OUT, `hostname NAME` renames the machine, `date
+# MMDDhhmm` sets the clock. Maps each to (flags that take a value, the most
+# plain words allowed). Words starting with "+" are date formats, not times.
+_POSITIONAL_LIMIT: dict[str, tuple[set[str], int]] = {
+    "uniq":     ({"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"}, 1),
+    "hostname": (set(), 0),
+    "date":     ({"-d", "--date", "-r", "--reference", "-f", "--file"}, 0),
+}
+
+
+def _too_many_positionals(base: str, tokens: list[str]) -> bool:
+    """True if a command in :data:`_POSITIONAL_LIMIT` got a word that writes."""
+    spec = _POSITIONAL_LIMIT.get(base)
+    if spec is None:
+        return False
+    takes_value, limit = spec
+    count, skip = 0, False
+    for token in tokens:
+        if skip:
+            skip = False
+            continue
+        if token == "--":
+            continue
+        if token.startswith("-") and token != "-":
+            skip = token in takes_value
+            continue
+        if base == "date" and token.startswith("+"):
+            continue
+        count += 1
+    return count > limit
 
 # git subcommands that LIST by default but CHANGE the repository once given an
 # argument (`git branch -D x`, `git tag -d v1`, `git remote add …`). They count
@@ -197,12 +234,14 @@ def is_readonly_command(command: str) -> bool:
             return False
         base = tokens[0]
         if base in _READONLY_CMDS:
-            if _has_unsafe_flag(base, tokens[1:]):
+            if _has_unsafe_flag(base, tokens[1:]) or _too_many_positionals(base, tokens[1:]):
                 return False
             continue
         if base in _READONLY_SUBCMD:
             allowed = _READONLY_SUBCMD[base]
             if allowed is None:
+                if _has_unsafe_flag(base, tokens[1:]):
+                    return False
                 continue
             if base in _FLAG_SUBCMD:
                 # pacman-style: the operation IS a flag. Require that at least
@@ -268,8 +307,17 @@ _SENSITIVE_PATTERNS = [
     r"(^|/)\.git-credentials$",
     r"(^|/)\.config/maze-ai/config\.json$",
     r"(^|/)\.local/share/keyrings(/|$)",
-    r"(^|/)\.mozilla/.*(cookies|logins|key\d)",
-    r"(^|/)\.config/(google-chrome|chromium|BraveSoftware)/.*(Login Data|Cookies)",
+    r"(^|/)(\.mozilla|\.thunderbird|\.config/mozilla)/.*(cookies|logins|key\d)",
+    r"(^|/)\.config/(google-chrome|chromium|BraveSoftware|vivaldi|microsoft-edge|opera)/"
+    r".*(Login Data|Cookies)",
+    r"(^|/)\.config/(gh|hub)(/|$)",
+    r"(^|/)\.config/rclone/rclone\.conf$",
+    r"(^|/)\.config/gcloud(/|$)",
+    r"(^|/)\.cargo/credentials(\.toml)?$",
+    r"(^|/)\.terraform\.d/credentials",
+    r"(^|/)\.vault-token$",
+    r"(^|/)NetworkManager/system-connections(/|$)",
+    r"(^|/)\.local/share/fish/fish_history$",
     r"(^|/)\.password-store(/|$)",
     r"(^|/)id_(rsa|dsa|ecdsa|ed25519)",
     r"(^|/)\.(bash|zsh|python|mysql|psql)_history$",
@@ -310,6 +358,73 @@ _GLOB_CHARS = re.compile(r"[*?\[]")
 # Bound the work a single check may do when expanding a glob.
 _GLOB_LIMIT = 256
 
+_BRACE_SEQ = re.compile(r"^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.-?\d+)?$")
+
+
+def _expand_braces(text: str, limit: int = _GLOB_LIMIT) -> list[str]:
+    """Every word bash makes of ``text`` by brace expansion, as far as matters
+    here: ``~/.{ssh,x}`` -> ``~/.ssh``, ``~/.x``; ``~/.s{r..t}h`` -> ``.srh``…
+
+    Quoting is ignored on purpose — expanding a quoted brace that bash would
+    leave alone only means one extra spelling is checked. Bounded by ``limit``.
+    """
+    out: list[str] = []
+    todo = [text]
+    while todo and len(out) < limit:
+        word = todo.pop()
+        start = word.find("{")
+        while start != -1:
+            depth, commas, end = 0, [], -1
+            for i in range(start, len(word)):
+                ch = word[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+                elif ch == "," and depth == 1:
+                    commas.append(i)
+            if end == -1:
+                start = -1
+                break
+            head, body, tail = word[:start], word[start + 1:end], word[end + 1:]
+            parts: list[str] = []
+            if commas:
+                bounds = [start, *commas, end]
+                parts = [word[a + 1:b] for a, b in zip(bounds[:-1], bounds[1:], strict=True)]
+            else:
+                seq = _BRACE_SEQ.match(body)
+                if seq:
+                    lo, hi = seq.group(1), seq.group(2)
+                    if lo.lstrip("-").isdigit() and hi.lstrip("-").isdigit():
+                        a, b = int(lo), int(hi)
+                        step = 1 if b >= a else -1
+                        parts = [str(n) for n in range(a, b + step, step)[:limit]]
+                    elif lo.isalpha() and hi.isalpha():
+                        a, b = ord(lo), ord(hi)
+                        step = 1 if b >= a else -1
+                        parts = [chr(n) for n in range(a, b + step, step)]
+            if parts:
+                todo.extend(head + part + tail for part in parts)
+                break
+            start = word.find("{", start + 1)
+        if start == -1:
+            out.append(word)
+    return out or [text]
+
+
+# Shell syntax that runs or splices a command into the line. Removing it leaves
+# the words the inner command would print in place: `cat $(echo ~/.ssh)/k`
+# collapses to `cat echo ~/.ssh/k`, which the patterns can see. Best effort —
+# a substitution can compute any string — but it covers the plain spellings.
+_SPLICE = re.compile(r"\$\(|<\(|>\(|\)|`|['\"\\]")
+
+
+def _collapse_shell(text: str) -> str:
+    return _SPLICE.sub("", text)
+
 
 def _path_forms(text: str) -> list[str]:
     """Every spelling of a path worth matching: as written, with ~ and $VARS
@@ -324,15 +439,17 @@ def _path_forms(text: str) -> list[str]:
     import glob as _glob
 
     forms = [text]
-    expanded = os.path.expanduser(os.path.expandvars(text))
-    forms.append(expanded)
-    candidates = [expanded]
-    if _GLOB_CHARS.search(expanded):
-        try:
-            matches = _glob.glob(expanded)
-        except (OSError, ValueError, re.error):
-            matches = []
-        candidates.extend(matches[:_GLOB_LIMIT])
+    candidates: list[str] = []
+    for variant in _expand_braces(text):
+        expanded = os.path.expanduser(os.path.expandvars(variant))
+        forms.append(expanded)
+        candidates.append(expanded)
+        if _GLOB_CHARS.search(expanded):
+            try:
+                matches = _glob.glob(expanded)
+            except (OSError, ValueError, re.error):
+                matches = []
+            candidates.extend(matches[:_GLOB_LIMIT])
     for cand in candidates:
         norm = os.path.normpath(cand)
         forms.append(norm)
@@ -355,7 +472,7 @@ def touches_sensitive_path(command: str) -> str:
     """Return the sensitive fragment a command references, or "" if none.
 
     Works on the raw command line and on every word in it, each canonicalised
-    by :func:`_path_forms`, so quoting (``~/.s''sh``), globs, ``$HOME``,
+    by :func:`_path_forms`, so quoting (``~/.s''sh``), globs, braces, ``$HOME``,
     ``./``/``../`` segments and symlinks cannot hide the file being read.
     """
     text = (command or "")
@@ -369,6 +486,11 @@ def touches_sensitive_path(command: str) -> str:
         words = shlex.split(text, comments=False, posix=True)
     except ValueError:
         words = text.split()
+    # The same line with command substitution spliced flat, so a path built by
+    # `$(echo ~/.ssh)` or `` `printf ~/.s`sh `` is judged as the path it makes.
+    collapsed = _collapse_shell(text)
+    if collapsed != text:
+        words += collapsed.split()
     for word in words:
         # Strip redirection/assignment prefixes so `<file` and `X=file` count.
         word = word.lstrip("<>").split("=", 1)[-1] if "=" in word else word.lstrip("<>")

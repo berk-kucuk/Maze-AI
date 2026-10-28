@@ -30,7 +30,7 @@ from .approval import ApprovalDialog
 from .chat_view import COLUMN_MAX, ChatView, add_applied_listener
 from .chat_view import notice_text as _notice_text
 from .dialogs import ConfirmDialog, PromptDialog, ShortcutsDialog, notify_toast, shortcut_text
-from .effects import AuroraCard, GlowDot
+from .effects import RADIUS, AuroraCard, GlowDot
 from .input_bar import InputBar
 from .onboarding import OnboardingDialog
 from .richtext import harden_labels, plain_label
@@ -360,6 +360,7 @@ class MainWindow(QWidget):
         if event.type() == QEvent.Type.WindowStateChange:
             maximized = self.isMaximized() or self.isFullScreen()
             self.card.set_flush(maximized)
+            self.sidebar.set_corner_radius(0 if maximized else RADIUS)
             m = self.card.margin
             self._body.setContentsMargins(m, m, m, m)
             self.title_bar.set_maximized(maximized)

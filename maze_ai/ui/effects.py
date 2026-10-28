@@ -34,7 +34,9 @@ class AuroraCard(QFrame):
         super().__init__(parent)
         self._margin = MARGIN
         self._radius = RADIUS
-        self.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
+        # No contentsMargins here: every caller already insets its layout by
+        # ``margin``. Setting both doubled the inset (and the stylesheet's
+        # repolish reset this one at random), showing a grey band at times.
         self._phase = 0.0
         self._animated = animated
 
@@ -87,7 +89,6 @@ class AuroraCard(QFrame):
         """Maximized windows fill the screen edge to edge: no margin, no corners."""
         self._margin = 0 if flush else MARGIN
         self._radius = 0 if flush else RADIUS
-        self.setContentsMargins(self._margin, self._margin, self._margin, self._margin)
         self._shadow.setEnabled(not flush)
         self.update()
 

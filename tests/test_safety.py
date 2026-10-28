@@ -56,6 +56,48 @@ def test_command_touching_a_secret_is_reported():
     assert not touches_sensitive_path("cat ~/notes.txt")
 
 
+@pytest.mark.parametrize("path", [
+    "~/.config/gh/hosts.yml", "~/.cargo/credentials.toml",
+    "~/.config/rclone/rclone.conf", "~/.vault-token", "~/.config/gcloud/credentials.db",
+    "~/.terraform.d/credentials.tfrc.json", "~/.thunderbird/x.default/logins.json",
+    "/etc/NetworkManager/system-connections/home.nmconnection",
+    "~/.local/share/fish/fish_history",
+])
+def test_more_credential_stores_are_sensitive(path):
+    assert is_sensitive_path(path)
+
+
+# Bash expands braces before the command sees its arguments, so these all
+# name ~/.ssh — none of them contains ".ssh" as text, and none needs the
+# directory to exist for the check to see it.
+@pytest.mark.parametrize("command", [
+    "cat ~/.{ssh,x}/*",
+    "grep -r '' ~/.{ssh,}",
+    "cat ~/.{ss,}h/config",
+    "cat ~/.s{s,}h/known_hosts",
+    "cat ~/.s{r..t}h/known_hosts",
+    "tar cf - ~/.{gnupg,nothing}",
+    # Command substitution building the path.
+    "cat $(echo ~/.ssh)/known_hosts",
+    "cat $(printf '%s' ~/.s)sh/known_hosts",
+    "cat `echo ~/.ssh`/known_hosts",
+])
+def test_spelled_out_secret_paths_are_seen(command):
+    assert touches_sensitive_path(command)
+    assert not is_readonly_command(command)
+
+
+def test_brace_expansion_handles_lists_sequences_and_nesting():
+    from maze_ai.agent.safety import _expand_braces
+    assert sorted(_expand_braces("~/.{ssh,x}")) == ["~/.ssh", "~/.x"]
+    assert sorted(_expand_braces("{1..3}")) == ["1", "2", "3"]
+    assert sorted(_expand_braces("x{a,{b,c}}")) == ["xa", "xb", "xc"]
+    assert _expand_braces("a{b}c") == ["a{b}c"]
+    assert _expand_braces("{") == ["{"]
+    assert len(_expand_braces("{a,b}" * 20)) <= 256
+    assert len(_expand_braces("{1..999999999}")) <= 256
+
+
 def test_reading_a_secret_is_never_auto_approved():
     # The whole exfiltration chain starts here: a "read-only" cat of a key.
     assert not is_readonly_command("cat ~/.ssh/id_rsa")
@@ -116,6 +158,19 @@ def test_reading_a_secret_is_never_auto_approved():
     "git tag -d v1.0",
     "git remote add evil https://evil.tld/repo.git",
     "git remote set-url origin https://evil.tld/repo.git",
+    # The environment is where API keys live: dumping it is a secret read.
+    "printenv",
+    # A plain word that writes: uniq's OUTPUT file, a new hostname, a time.
+    "uniq notes.txt /home/u/.bashrc",
+    "uniq -f 1 in.txt out.txt",
+    "hostname evil",
+    "date 0101120020",
+    # journalctl maintenance flags delete, move or re-key the logs.
+    "journalctl --vacuum-time=1s",
+    "journalctl --vacuum-size 1M",
+    "journalctl --rotate",
+    "journalctl --flush",
+    "journalctl --setup-keys",
 ])
 def test_readonly_classifier_rejects_smuggled_commands(command):
     assert not is_readonly_command(command)
@@ -123,7 +178,7 @@ def test_readonly_classifier_rejects_smuggled_commands(command):
 
 @pytest.mark.parametrize("command", [
     "ls -la", "cat /etc/os-release", "df -h | grep /dev", "ps aux | grep python",
-    "free -h && uptime", "echo hello", "stat /etc/hosts", "printenv",
+    "free -h && uptime", "echo hello", "stat /etc/hosts",
     "git status", "git log --oneline -5", "git diff",
     "systemctl status sshd", "journalctl -u sshd -n 50",
     "pacman -Qi linux", "pacman -Ss firefox",
@@ -138,6 +193,9 @@ def test_readonly_classifier_rejects_smuggled_commands(command):
     # Plain searches and listings stay prompt-free.
     "rg foo .", "ag foo", "git branch", "git branch -a", "git tag -l",
     "git remote -v", "git show HEAD",
+    "uniq notes.txt", "uniq -f 2 notes.txt", "hostname", "hostname -I",
+    "date", "date +%F", "date -d '2 days ago' +%F", "journalctl -b -p err",
+    "grep -rn foo src/{a,b}.py",
 ])
 def test_readonly_classifier_still_accepts_ordinary_inspects(command):
     assert is_readonly_command(command)

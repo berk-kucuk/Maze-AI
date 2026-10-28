@@ -25,6 +25,7 @@ from ..history import Conversation
 from ..i18n import tr
 from . import icons
 from .dialogs import shortcut_text, with_shortcut
+from .effects import RADIUS
 from .richtext import plain_label, plain_tooltip
 from .theme import BG, DANGER, LINE, LOGO_PATH, SIDEBAR, TEXT, TEXT_DIM, TEXT_FAINT
 
@@ -243,10 +244,7 @@ class HistorySidebar(QWidget):
         self.setFixedWidth(SIDEBAR_WIDTH)
         self.setObjectName("sidebar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"QWidget#sidebar {{ background: {SIDEBAR}; border-right: 1px solid {LINE};"
-            "border-top-left-radius: 14px; border-bottom-left-radius: 14px; }"
-        )
+        self.set_corner_radius(RADIUS)
         self._all: list[Conversation] = []
         self._shown: list[Conversation] = []
         self._active_id = ""
@@ -322,6 +320,13 @@ class HistorySidebar(QWidget):
         self._empty.setStyleSheet(f"color: {TEXT_FAINT}; background: transparent; font-size: 9pt;")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self._empty.setContentsMargins(0, 18, 0, 0)
+
+    def set_corner_radius(self, radius: int) -> None:
+        """Round the left corners to match the window card (0 when maximized)."""
+        self.setStyleSheet(
+            f"QWidget#sidebar {{ background: {SIDEBAR}; border-right: 1px solid {LINE};"
+            f"border-top-left-radius: {radius}px; border-bottom-left-radius: {radius}px; }}"
+        )
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         # The empty parts of the rail (the brand row) move the window, like the
@@ -429,8 +434,8 @@ class HistorySidebar(QWidget):
 def maze_linux_tag(text: str, size_px: int = 10):
     """The small "for Maze Linux" line beside the app name. It takes the
     surrounding text colour and fades it, so it reads right in every theme."""
-    from PySide6.QtWidgets import QGraphicsOpacityEffect, QLabel
     from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QGraphicsOpacityEffect, QLabel
     tag = QLabel(text)
     tag.setObjectName("mazeLinuxTag")
     tag.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)

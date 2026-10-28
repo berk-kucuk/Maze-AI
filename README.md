@@ -258,7 +258,7 @@ Chats, memory notes and undo backups live in `~/.local/share/maze-ai/`; pasted i
 pytest -v
 ```
 
-All 893 tests pass (UI behavior, streaming, language detection, tool execution). Tests that talk to a real Ollama server run with `MAZE_AI_LIVE=1` (optionally `MAZE_AI_LIVE_MODEL=<name>`).
+All 930 tests pass (UI behavior, streaming, language detection, tool execution). Tests that talk to a real Ollama server run with `MAZE_AI_LIVE=1` (optionally `MAZE_AI_LIVE_MODEL=<name>`).
 
 ### Linting
 
