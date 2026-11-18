@@ -15,6 +15,12 @@ import requests
 # Status codes that usually clear up on a retry (rate limit + gateway/5xx).
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
+#: Used when a caller gives none (audit MA5): ``requests`` itself waits
+#: forever, which would freeze the turn on a server that accepts the
+#: connection and never answers. Connect, then read — generous for a long
+#: model reply, finite all the same.
+DEFAULT_TIMEOUT = (10, 600)
+
 
 def request_with_retry(
     method: str,
@@ -33,6 +39,8 @@ def request_with_retry(
     without inspecting the status body.
     """
     attempts = max(1, attempts)
+    if kwargs.get("timeout") is None:
+        kwargs["timeout"] = DEFAULT_TIMEOUT
     last_exc: Exception | None = None
     for i in range(attempts):
         try:

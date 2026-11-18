@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import MODE_ASK, MODE_AUTO, MODE_CHAT, Config
-from ..llm.base import LLMBackend, LLMError, LLMReply
+from ..llm.base import LLMBackend, LLMError, LLMReply, remote_provider
 from ..llm.hardware import estimate_fit
 from ..style import PERSONA_BALANCED, EmojiFilter, strip_emoji
 from .lookup import is_coding_request, lookup_query
@@ -29,6 +29,9 @@ from .rules import (
     written_by_command,
 )
 from .safety import (
+    egress_chars,
+    outbound_text,
+    secret_like_tokens,
     is_dangerous_command,
     is_sensitive_path,
     looks_like_exfiltration,
@@ -125,12 +128,21 @@ class AgentEvent:
 # scattered through the policy below.
 REASON_EGRESS_SAVE = "it downloads content and writes it to a file"
 REASON_EGRESS_URL = "this URL carries data out to a remote server"
+REASON_EGRESS_BUDGET = ("after reading your files this turn, it would send more data out "
+                        "in web requests ({detail} characters so far)")
+REASON_EGRESS_LOCAL = "it would send text it read from your files or commands out ({detail})"
 REASON_SENSITIVE = "it touches a sensitive path ({detail})"
+#: The same on a hosted model: what the tool returns goes into the next
+#: request, so the user is told where (audit MA4). Detail: "path → provider".
+REASON_SENSITIVE_CLOUD = ("it touches a sensitive path, and what it reads will be sent "
+                          "to your model provider ({detail})")
 REASON_DESTRUCTIVE = "this command is destructive and cannot be undone"
 REASON_RULE = "it matches the safety rule “{detail}”"
 REASON_COMMAND = "it runs a command on your machine"
 REASON_CHANGES = "it changes something on your machine"
 REASON_SCREEN = "it photographs your screen and shows the result to the model"
+REASON_SCREEN_CLOUD = ("it photographs your screen and sends the picture to your model "
+                       "provider ({detail})")
 REASON_IMPERSONATION = "it puts a message on your desktop under Maze AI's name"
 REASON_MEMORY = "it saves a lasting note right after reading outside content: {detail}"
 
@@ -143,8 +155,27 @@ UNTRUSTED_READ_TOOLS = {
     "arch_news", "search_folder", "python_doc",
 }
 
+#: Tools whose results come from THIS machine (files, commands, the screen).
+#: Once one has run in a turn, what that turn sends out in URLs and searches is
+#: added up (EGRESS_BUDGET): a secret read here can otherwise leave in pieces,
+#: each request short enough to pass looks_like_exfiltration on its own.
+LOCAL_READ_TOOLS = {
+    "read_file", "search_files", "list_dir", "run_command", "read_screen", "read_window",
+    "ocr_image", "recent_commands", "search_folder",
+}
+#: Tools whose arguments leave the machine: the URL fetched, the search sent.
+OUTBOUND_TOOLS = EGRESS_TOOLS | {"web_search"}
+#: Characters a turn may send out after a local read before every further
+#: request is confirmed. Room for a few ordinary searches and page fetches.
+#: The main guard is the content match (REASON_EGRESS_LOCAL): a key-like
+#: string read this turn found in an outgoing request. The budget is for
+#: pieces too small to be recognised.
+EGRESS_BUDGET = 128
+#: How much of this turn's local reads is kept for that match.
+LOCAL_TEXT_LIMIT = 2_000_000
+
 #: Reasons that must be confirmed every single time — never "always allow".
-UNSKIPPABLE_REASONS = (REASON_SENSITIVE, REASON_DESTRUCTIVE, REASON_RULE)
+UNSKIPPABLE_REASONS = (REASON_SENSITIVE, REASON_SENSITIVE_CLOUD, REASON_DESTRUCTIVE, REASON_RULE)
 
 
 @dataclass
@@ -515,6 +546,12 @@ class Agent:
         self.summarize_history = True
         #: Set once this turn has read outside content (see UNTRUSTED_READ_TOOLS).
         self._tainted = False
+        #: Set once this turn has read something from this machine, and what
+        #: the turn has sent out in URLs and searches since (EGRESS_BUDGET),
+        #: and the text those local reads returned (REASON_EGRESS_LOCAL).
+        self._read_local = False
+        self._egress_used = 0
+        self._local_text = ""
         # The shell's working directory for this conversation. `cd` inside a
         # run_command carries over to the next call instead of evaporating.
         self.cwd = str(Path.home())
@@ -732,6 +769,9 @@ class Agent:
     ) -> str:
         self._cancel = False
         self._tainted = False
+        self._read_local = False
+        self._egress_used = 0
+        self._local_text = ""
         enable_tools = self.mode != MODE_CHAT
         # A picture for a model that can't see: answer this one turn with an
         # installed model that can, instead of sending the image into the void.
@@ -1303,6 +1343,7 @@ class Agent:
 
                 result = self._execute(call.name, call.arguments)
                 self._tainted |= call.name in UNTRUSTED_READ_TOOLS
+                self._count_outbound(call.name, call.arguments, result.output)
                 emit(AgentEvent("tool_result", tool=call.name,
                                 text=result.output, ok=result.ok))
                 messages.append({
@@ -1485,6 +1526,7 @@ class Agent:
 
             result = self._execute(spec.name, action_input)
             self._tainted |= spec.name in UNTRUSTED_READ_TOOLS
+            self._count_outbound(spec.name, action_input, result.output)
             emit(AgentEvent("tool_result", tool=action, text=result.output, ok=result.ok))
             messages.append({"role": "assistant", "content": reply})
             observation: dict = {
@@ -1649,6 +1691,43 @@ class Agent:
         """Whether a tool call must be confirmed by the user."""
         return self._approval_reason(action, action_input)[0] is not None
 
+    @staticmethod
+    def _outbound_chars(action: str, action_input: dict) -> int:
+        """Characters of data this call would send out (see egress_chars)."""
+        if action in EGRESS_TOOLS:
+            return egress_chars(str(action_input.get("url", "")))
+        if action == "web_search":
+            return len(str(action_input.get("query", "")))
+        return 0
+
+    def _count_outbound(self, action: str, action_input: dict, output: str = "") -> None:
+        """After a tool ran: keep what a local read returned, add up what
+        went out since."""
+        if action in LOCAL_READ_TOOLS:
+            self._read_local = True
+            if len(self._local_text) < LOCAL_TEXT_LIMIT:
+                self._local_text += "\n" + str(output or "")[:LOCAL_TEXT_LIMIT]
+        elif action in OUTBOUND_TOOLS and self._read_local:
+            self._egress_used += self._outbound_chars(action, action_input)
+
+    def _carries_local_secret(self, action: str, action_input: dict) -> str:
+        """A key-like piece of this turn's local reads inside this request."""
+        if action in EGRESS_TOOLS:
+            text, host = outbound_text(str(action_input.get("url", "")))
+        elif action == "web_search":
+            text, host = outbound_text(str(action_input.get("query", "")), is_url=False)
+        else:
+            return ""
+        for tok in sorted(secret_like_tokens(text), key=len, reverse=True):
+            if tok in self._local_text:
+                return tok[:6] + "…"
+        if host:
+            local = self._local_text.lower()
+            for tok in sorted(secret_like_tokens(host, case_blind=True), key=len, reverse=True):
+                if tok in local:
+                    return tok[:6] + "…"
+        return ""
+
     def _approval_reason(self, action: str, action_input: dict) -> tuple[str | None, str]:
         """Why this call needs confirming — ``(None, "")`` to run it straight away."""
         # 1. Data leaving the machine. The destination comes from model output,
@@ -1661,6 +1740,16 @@ class Agent:
                 return REASON_EGRESS_SAVE, str(action_input.get("save_path"))
             if looks_like_exfiltration(url):
                 return REASON_EGRESS_URL, url
+        # 1b. The same, spread over many requests: once this turn has read
+        #     from this machine, what it sends out is added up, and past the
+        #     budget every further request is confirmed.
+        if action in OUTBOUND_TOOLS and self.confirm_egress and self._read_local:
+            piece = self._carries_local_secret(action, action_input)
+            if piece:
+                return REASON_EGRESS_LOCAL, piece
+            cost = self._outbound_chars(action, action_input)
+            if cost and self._egress_used + cost > EGRESS_BUDGET:
+                return REASON_EGRESS_BUDGET, str(self._egress_used + cost)
 
         # 2. Secrets. Reading a private key or a token store is never silent,
         #    whatever the mode — this is the step a prompt-injection attack
@@ -1671,7 +1760,7 @@ class Agent:
                 # Reads private data (shell history) without naming a path.
                 hit = action
             elif action == "run_command":
-                hit = touches_sensitive_path(str(action_input.get("command", "")))
+                hit = touches_sensitive_path(str(action_input.get("command", "")), self.cwd)
             else:
                 for key in self._PATH_ARGS:
                     value = action_input.get(key)
@@ -1679,6 +1768,9 @@ class Agent:
                         hit = str(value)
                         break
             if hit:
+                provider = remote_provider(self.backend)
+                if provider:
+                    return REASON_SENSITIVE_CLOUD, f"{hit} → {provider}"
                 return REASON_SENSITIVE, hit
 
         # 2b. A lasting note, after the turn has read outside content: that
@@ -1692,6 +1784,9 @@ class Agent:
         #    the machine. Reading a private key by path already asks; a
         #    photograph of it must not be the way around that.
         if action in SCREEN_TOOLS and self.mode != MODE_AUTO:
+            provider = remote_provider(self.backend)
+            if provider:
+                return REASON_SCREEN_CLOUD, provider
             return REASON_SCREEN, str(action_input.get("name", "") or "")
 
         # 4. Speaking as Maze AI. A notification the user did not ask for is a
@@ -1710,7 +1805,7 @@ class Agent:
                 command = str(action_input.get("command", ""))
             else:
                 command = f"{action_input.get('app', '')} {action_input.get('args', '')}".strip()
-            verdict = classify(command, self.blocked_commands, self.safe_commands)
+            verdict = classify(command, self.blocked_commands, self.safe_commands, cwd=self.cwd)
             # The destructive check comes first on purpose. "Always confirm
             # destructive commands, even in autonomous mode" has to outrank a
             # remembered approval too, or one entry on the allow-list — however

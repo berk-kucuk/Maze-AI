@@ -197,8 +197,11 @@ def test_readonly_classifier_rejects_smuggled_commands(command):
     "date", "date +%F", "date -d '2 days ago' +%F", "journalctl -b -p err",
     "grep -rn foo src/{a,b}.py",
 ])
-def test_readonly_classifier_still_accepts_ordinary_inspects(command):
-    assert is_readonly_command(command)
+def test_readonly_classifier_still_accepts_ordinary_inspects(command, tmp_path):
+    # Judged where such commands run: in a project. (Run in a home directory,
+    # `rg foo .` walks every secret there and rightly asks; see
+    # test_recursive_search_is_judged_by_what_it_walks.)
+    assert is_readonly_command(command, str(tmp_path))
 
 
 # ── URLs ───────────────────────────────────────────────────────────────────

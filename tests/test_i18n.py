@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from maze_ai import i18n
+from maze_ai.agent import agent as _agent
 from maze_ai.agent.agent import (
     REASON_CHANGES,
     REASON_COMMAND,
@@ -58,10 +59,8 @@ def test_auto_ignores_the_c_locale(monkeypatch):
 
 
 # ── catalogue integrity ────────────────────────────────────────────────────
-@pytest.mark.parametrize("reason", [
-    REASON_EGRESS_SAVE, REASON_EGRESS_URL, REASON_SENSITIVE,
-    REASON_DESTRUCTIVE, REASON_COMMAND, REASON_CHANGES,
-])
+@pytest.mark.parametrize("reason", sorted(
+    v for k, v in vars(_agent).items() if k.startswith("REASON_")))
 def test_every_approval_reason_is_translated(reason):
     # These are shown in the dialog that guards the user's machine — an
     # untranslated one would appear as raw English mid-sentence.

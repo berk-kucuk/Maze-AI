@@ -15,7 +15,7 @@ import re
 import shlex
 import socket
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # ── destructive commands ──────────────────────────────────────────────────
 # A match forces explicit approval even in autonomous mode (when
@@ -202,7 +202,7 @@ _SHELL_SPLIT = re.compile(r"\|\||&&|\||;|&|\n|\r")
 _SHELL_EXEC_MARKERS = ("$(", "`", "<(", ">(")
 
 
-def is_readonly_command(command: str) -> bool:
+def is_readonly_command(command: str, cwd: str | None = None) -> bool:
     """True if every segment of the command line is a safe, read-only inspect.
 
     Conservative by design: anything with output redirection, ``sudo`` or an
@@ -220,7 +220,7 @@ def is_readonly_command(command: str) -> bool:
         return False
     if any(marker in cmd for marker in _SHELL_EXEC_MARKERS):
         return False
-    if touches_sensitive_path(cmd):
+    if touches_sensitive_path(cmd, cwd):
         return False
     segments = [s.strip() for s in _SHELL_SPLIT.split(cmd) if s.strip()]
     if not segments:
@@ -293,7 +293,7 @@ def is_readonly_command(command: str) -> bool:
 # Paths that hold credentials, keys or private history. Reading one is never
 # auto-approved: a poisoned web page could otherwise talk the model into
 # dumping the user's SSH key without a single prompt.
-_SENSITIVE_PATTERNS = [
+_SECRET_PATTERNS = [
     r"(^|/)\.ssh(/|$)",
     r"(^|/)\.gnupg(/|$)",
     r"(^|/)\.aws(/|$)",
@@ -325,6 +325,41 @@ _SENSITIVE_PATTERNS = [
     r"/etc/(shadow|gshadow|sudoers)",
     r"\.(pem|p12|pfx|jks|keystore)$",
     r"(secret|credential|passwd|password|api[_-]?key|token)s?\.(json|ya?ml|txt|ini|conf|env)$",
+    # Wallets: a wallet file is the money itself.
+    r"(^|/)wallet\.dat$",
+    r"(^|/)\.bitcoin/wallets?(/|$)",
+    r"(^|/)\.electrum(-ltc)?/wallets(/|$)",
+    r"(^|/)Monero/wallets(/|$)",
+    r"(^|/)\.ethereum/keystore(/|$)",
+    r"(^|/)\.sparrow(/|$)",
+    r"(^|/)\.config/(Exodus|Ledger Live|Electrum|Sparrow)(/|$)",
+    # Key and password stores.
+    r"(^|/)\.config/sops(/|$)",
+    r"\.kdbx?$",
+    r"(^|/)\.local/share/kwalletd(/|$)",
+    # Private conversations and mail.
+    r"(^|/)\.config/(Signal|Element|Session)(/|$)",
+    r"(^|/)\.local/share/TelegramDesktop(/|$)",
+    r"(^|/)\.thunderbird(/|$)",
+    # Maze's own apps: the vault, encrypted capsules and their key backups,
+    # Haze's settings (lock hash) and saved sessions, HazeDrop's history,
+    # Maze Connect's device identity key, Maze Crypto's wallets and portfolio.
+    r"(^|/)\.(config|local/share)/maze-vault(/|$)",
+    r"(^|/)\.(config|local/share)/maze-capsule(/|$)",
+    r"(^|/)gocryptfs\.conf$",
+    r"(^|/)\.config/haze(/|$)",
+    r"(^|/)\.local/share/hazedrop(/|$)",
+    r"(^|/)\.(config|local/share)/mazeconnect(/|$)",
+    r"(^|/)\.local/share/maze-crypto(/|$)",
+    # The process environment holds API keys as often as any dotfile does.
+    r"^/proc/(self|\d+)/environ$",
+    # The backup store is the undo history itself, copies of edited files
+    # (secrets included) — and editing its index is how you would make a
+    # deletion unrecoverable without anyone noticing.
+    r"(^|/)\.local/share/maze-ai/backups(/|$)",
+]
+# Not secrets, but files that decide what runs automatically.
+_PERSISTENCE_PATTERNS = [
     # Persistence. Nothing here holds a secret — these are the files that decide
     # what runs automatically, at every login or every shell. A line appended to
     # .bashrc or a .desktop dropped in autostart is code execution from then on,
@@ -344,13 +379,12 @@ _SENSITIVE_PATTERNS = [
     r"(^|/)\.gitconfig$",
     r"(^|/)\.config/git/config$",
     r"(^|/)\.git/(hooks(/|$)|config$)",
-    # The process environment holds API keys as often as any dotfile does.
-    r"^/proc/(self|\d+)/environ$",
-    # The backup store is the undo history itself. Editing its index is how you
-    # would make a deletion unrecoverable without anyone noticing.
-    r"(^|/)\.local/share/maze-ai/backups(/|$)",
 ]
+_SENSITIVE_PATTERNS = _SECRET_PATTERNS + _PERSISTENCE_PATTERNS
 _SENSITIVE_RE = re.compile("|".join(_SENSITIVE_PATTERNS), re.IGNORECASE)
+# Secrets only: what a recursive search must not read (see _recursive_secret).
+# Persistence files are harmless to READ, and every repository has .git/config.
+_SECRET_RE = re.compile("|".join(_SECRET_PATTERNS), re.IGNORECASE)
 
 # Shell glob metacharacters. A path spelled with them (`~/.s[s]h/id_*`) never
 # matches the patterns above as text, so it is expanded against the real disk.
@@ -468,12 +502,210 @@ def is_sensitive_path(path: str | os.PathLike[str]) -> bool:
     return any(_SENSITIVE_RE.search(form) for form in _path_forms(text))
 
 
-def touches_sensitive_path(command: str) -> str:
+
+# ── recursive reads ───────────────────────────────────────────────────────
+# A search that walks a directory reads every file under it, named or not.
+# `grep -r BEGIN ~` read ~/.ssh/id_ed25519 although the command line named no
+# secret, so the path patterns above never saw it — and grep is a read-only
+# command, so it ran without a prompt. Here the directories a recursive
+# search would walk are looked into before it runs: any secret under them,
+# or anything that cannot be looked into, makes the command a sensitive read.
+
+# Programs that read file CONTENTS while walking directories. (`ls -R`,
+# `tree`, `du` and `find` list names, not contents.)
+_ALWAYS_RECURSIVE = {"rg", "ag"}
+_RECURSIVE_WITH_FLAG = {"grep", "egrep", "fgrep", "diff"}
+# Options that take the NEXT word as their value. Only options that really
+# do: wrongly treating a path as an option's value would hide that path from
+# the check, so anything not listed is assumed to take no value.
+_VALUE_FLAGS: dict[str, set[str]] = {
+    "grep": {"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file",
+             "--max-count", "--after-context", "--before-context", "--context",
+             "--directories", "--devices", "--include", "--exclude", "--exclude-dir",
+             "--exclude-from", "--label", "--binary-files", "--group-separator"},
+    "rg": {"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-j", "-M", "-r", "-E",
+           "-d", "--regexp", "--file", "--glob", "--iglob", "--type", "--type-not",
+           "--max-count", "--after-context", "--before-context", "--context", "--threads",
+           "--max-columns", "--replace", "--encoding", "--max-depth", "--max-filesize",
+           "--path-separator", "--pre", "--pre-glob", "--sort", "--sortr", "--type-add",
+           "--type-clear", "--context-separator", "--field-match-separator",
+           "--field-context-separator", "--colors", "--color", "--ignore-file", "--engine",
+           "--dfa-size-limit", "--regex-size-limit", "--hostname-bin", "--hyperlink-format"},
+    "ag": {"-A", "-B", "-C", "-G", "-g", "-m", "-p", "--after", "--before", "--context",
+           "--file-search-regex", "--max-count", "--depth", "--ignore", "--ignore-dir",
+           "--path-to-ignore", "--workers", "--pager"},
+    "diff": {"-I", "-x", "-X", "-S", "-W", "-F", "-D", "--ignore-matching-lines",
+             "--exclude", "--exclude-from", "--starting-file", "--width",
+             "--show-function-line", "--label", "--ifdef", "--line-format",
+             "--horizon-lines", "--palette", "--from-file", "--to-file"},
+}
+_VALUE_FLAGS["egrep"] = _VALUE_FLAGS["fgrep"] = _VALUE_FLAGS["grep"]
+# Options that give the PATTERN, so no positional word is the pattern.
+_PATTERN_FLAGS = {"-e", "-f", "--regexp", "--file"}
+# Words that stand for paths decided at run time: unknown, so not safe.
+_RUNTIME_PATHS = {"{}", "-"}
+# How many entries a walk may visit before giving up. A tree that large (a
+# home directory, /) is not searched without asking anyway.
+_WALK_LIMIT = 10_000
+
+
+def _parse_reader(base: str, args: list[str]) -> tuple[bool, list[str]]:
+    """(walks directories?, the paths it is pointed at) for one invocation."""
+    values = _VALUE_FLAGS.get(base, set())
+    recursive = base in _ALWAYS_RECURSIVE
+    positionals: list[str] = []
+    explicit_pattern = False
+    files_mode = False
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if tok == "--":
+            positionals.extend(args[i:])
+            break
+        if tok.startswith("--"):
+            name, eq, val = tok.partition("=")
+            if name in ("--recursive", "--dereference-recursive"):
+                recursive = True
+            if name == "--directories" and (val if eq else (args[i] if i < len(args) else "")) == "recurse":
+                recursive = True
+            if name in _PATTERN_FLAGS:
+                explicit_pattern = True
+            if name == "--files":
+                files_mode = True
+            if name in ("--from-file", "--to-file"):
+                positionals.append(val if eq else (args[i] if i < len(args) else ""))
+            if name in values and not eq:
+                i += 1
+            continue
+        if tok.startswith("-") and tok != "-":
+            # A cluster of short options: -rn, -iRl, -A3, -e PATTERN.
+            for j, ch in enumerate(tok[1:], start=1):
+                flag = "-" + ch
+                if ch in "rR" and base != "rg":
+                    recursive = True
+                if flag in _PATTERN_FLAGS:
+                    explicit_pattern = True
+                if flag in values:
+                    rest = tok[j + 1:]
+                    if not rest:
+                        if flag == "-d" and i < len(args) and args[i] == "recurse":
+                            recursive = True
+                        i += 1                  # the value is the next word
+                    elif flag == "-d" and rest.lstrip("=") == "recurse":
+                        recursive = True
+                    break                       # the rest of the cluster is the value
+            continue
+        positionals.append(tok)
+    if base in ("grep", "egrep", "fgrep", "rg", "ag") and not explicit_pattern and not files_mode:
+        positionals = positionals[1:]           # the first word is the pattern
+    if not positionals and base != "diff":
+        positionals = ["."]                     # these search the working directory
+    return recursive, positionals
+
+
+def _tree_secret(root: str, budget: list[int]) -> str:
+    """The first secret found at or under ``root`` (the path as a reason), or
+    a reason it could not be looked into, or ""."""
+    if _SECRET_RE.search(root):
+        return root
+    try:
+        real = os.path.realpath(root)
+    except (OSError, ValueError):
+        return f"{root} (cannot be resolved)"
+    if _SECRET_RE.search(real):
+        return root
+    if not os.path.isdir(real):
+        return ""
+    blocked: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(real, followlinks=False,
+                                                onerror=lambda e: blocked.append(str(e.filename))):
+        if blocked:
+            # Something under it is unreadable to us — but maybe not to the
+            # command (sudo), so it cannot be vouched for.
+            return f"{root} ({blocked[0]} cannot be inspected)"
+        for name in (*dirnames, *filenames):
+            budget[0] -= 1
+            if budget[0] < 0:
+                return f"{root} (too large to inspect)"
+            path = os.path.join(dirpath, name)
+            if _SECRET_RE.search(path):
+                return path
+            if os.path.islink(path):
+                try:
+                    if _SECRET_RE.search(os.path.realpath(path)):
+                        return path
+                except (OSError, ValueError):
+                    return path
+    if blocked:
+        return f"{root} ({blocked[0]} cannot be inspected)"
+    return ""
+
+
+def _recursive_secret(command: str, cwd: str | None) -> str:
+    """A secret a recursive search in ``command`` would read, or ""."""
+    if not any(name in command for name in (*_ALWAYS_RECURSIVE, *_RECURSIVE_WITH_FLAG)):
+        return ""
+    here: str | None = cwd or str(Path.home())
+    budget = [_WALK_LIMIT]
+    for seg in _SHELL_SPLIT.split(command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            tokens = seg.split()
+        if not tokens:
+            continue
+        # Directory changes earlier on the line move where relative paths go.
+        if tokens[0] in ("cd", "pushd"):
+            target = tokens[1] if len(tokens) > 1 else "~"
+            if target == "-" or any(m in target for m in _SHELL_EXEC_MARKERS):
+                here = None
+            else:
+                target = os.path.expanduser(os.path.expandvars(target))
+                here = os.path.normpath(os.path.join(here, target)) if here is not None \
+                    else (target if os.path.isabs(target) else None)
+            continue
+        # The reader may sit behind sudo, env, timeout, xargs, find -exec…
+        for k, word in enumerate(tokens):
+            base = os.path.basename(word)
+            if base not in _ALWAYS_RECURSIVE and base not in _RECURSIVE_WITH_FLAG:
+                continue
+            recursive, roots = _parse_reader(base, tokens[k + 1:])
+            if not recursive:
+                break
+            if "xargs" in (os.path.basename(t) for t in tokens[:k]):
+                return f"{base} on paths read from input"
+            for root in roots:
+                if root in _RUNTIME_PATHS or "$" in root or any(m in root for m in _SHELL_EXEC_MARKERS):
+                    return f"{base} on a path decided at run time ({root})"
+                expanded = os.path.expanduser(os.path.expandvars(root))
+                if not os.path.isabs(expanded):
+                    if here is None:
+                        return f"{base} in an unknown directory"
+                    expanded = os.path.join(here, expanded)
+                targets = [expanded]
+                if _GLOB_CHARS.search(expanded):
+                    import glob as _glob
+                    targets = _glob.glob(expanded)[:_GLOB_LIMIT]
+                for target in targets:
+                    hit = _tree_secret(os.path.normpath(target), budget)
+                    if hit:
+                        return hit
+            break
+    return ""
+
+def touches_sensitive_path(command: str, cwd: str | None = None) -> str:
     """Return the sensitive fragment a command references, or "" if none.
 
     Works on the raw command line and on every word in it, each canonicalised
     by :func:`_path_forms`, so quoting (``~/.s''sh``), globs, braces, ``$HOME``,
     ``./``/``../`` segments and symlinks cannot hide the file being read.
+    A recursive search is judged by what it would walk (:func:`_recursive_secret`),
+    relative paths against ``cwd`` — where the command runs (home by default,
+    as for run_command).
     """
     text = (command or "")
     if not text:
@@ -500,7 +732,7 @@ def touches_sensitive_path(command: str) -> str:
             hit = _SENSITIVE_RE.search(form)
             if hit:
                 return hit.group(0)
-    return ""
+    return _recursive_secret(text, cwd)
 
 
 # ── URLs ──────────────────────────────────────────────────────────────────
@@ -572,6 +804,68 @@ _EXFIL_PATH_CHARS = 200
 _EXFIL_PATH_SEGMENTS = 12
 _EXFIL_HOST_CHARS = 80
 _EXFIL_LABEL_CHARS = 40
+
+
+def egress_chars(url: str) -> int:
+    """How much data a URL can carry beyond naming a page.
+
+    Counted: the query, the fragment, the path past its first segment and any
+    subdomain labels — every place a chunk of a secret can ride. A URL that
+    stays under looks_like_exfiltration's per-URL limits can still carry a
+    piece; the agent adds these up across a turn (see Agent._egress_used).
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return 0
+    parsed = urlparse(raw if "://" in raw else "https://" + raw)
+    labels = (parsed.hostname or "").split(".")
+    subdomain = ".".join(labels[:-2]) if len(labels) > 2 else ""
+    segments = [s for s in parsed.path.split("/") if s]
+    return (len(parsed.query) + len(parsed.fragment)
+            + sum(len(s) for s in segments[1:]) + len(subdomain))
+
+
+def outbound_text(url_or_query: str, is_url: bool = True) -> tuple[str, str]:
+    """The data-carrying parts of a URL (or a search text), URL-decoded, as
+    (case-preserving text, host name). The host is apart because DNS has no
+    case: it can only be compared case-insensitively."""
+    raw = (url_or_query or "").strip()
+    if not is_url:
+        return raw, ""
+    parsed = urlparse(raw if "://" in raw else "https://" + raw)
+    segments = [s for s in parsed.path.split("/") if s]
+    return (unquote(" ".join([parsed.query, parsed.fragment, *segments])),
+            (parsed.hostname or "").replace(".", " "))
+
+
+# "=" and "/" separate: a key in "API_KEY=…" and in "?k=…" must be the same token.
+_TOKEN = re.compile(r"[A-Za-z0-9_+-]{12,}")
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def secret_like_tokens(text: str, case_blind: bool = False) -> set[str]:
+    """Runs of characters that look like key material rather than words:
+    12+ characters mixing upper case, lower case and digits (API keys,
+    tokens, base64), or 16+ hex digits — with high entropy. Words, versions,
+    paths and error messages do not qualify, so searching an error a command
+    printed stays free. ``case_blind`` (host names) drops the mixed-case
+    requirement: letters and digits are enough there."""
+    import math
+    out = set()
+    for tok in _TOKEN.findall(text or ""):
+        upper = any(c.isupper() for c in tok)
+        lower = any(c.islower() for c in tok)
+        digit = any(c.isdigit() for c in tok)
+        hexlike = (len(tok) >= 16 and digit and any(c.isalpha() for c in tok)
+                   and all(c in _HEX for c in tok))
+        mixed = (upper and lower and digit) or (case_blind and digit and (upper or lower))
+        if not (mixed or hexlike):
+            continue
+        counts = {c: tok.count(c) for c in set(tok)}
+        entropy = -sum(n / len(tok) * math.log2(n / len(tok)) for n in counts.values())
+        if entropy >= 3.0:
+            out.add(tok)
+    return out
 
 
 def looks_like_exfiltration(url: str) -> bool:

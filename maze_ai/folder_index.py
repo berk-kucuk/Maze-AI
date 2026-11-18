@@ -131,7 +131,7 @@ class FolderIndex:
         self.root = Path(root).expanduser().resolve()
         cache = cache_dir or CACHE_DIR
         private_dir(cache)
-        digest = hashlib.sha1(str(self.root).encode()).hexdigest()[:16]
+        digest = hashlib.sha1(str(self.root).encode(), usedforsecurity=False).hexdigest()[:16]
         self.db_path = cache / f"{digest}.sqlite"
         self.db = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10)
         os.chmod(self.db_path, 0o600)

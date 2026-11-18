@@ -45,8 +45,9 @@ def test_always_confirmed(command):
     "journalctl --user -n 50", "python3 --version", "node -v", "nvidia-smi", "ollama list",
     "ip a", "df -h", "free -h",
 ])
-def test_safe(command):
-    assert classify(command).tier == "safe", command
+def test_safe(command, tmp_path):
+    # In a project directory: a recursive search there reads nothing secret.
+    assert classify(command, cwd=str(tmp_path)).tier == "safe", command
 
 
 @pytest.mark.parametrize("command", [

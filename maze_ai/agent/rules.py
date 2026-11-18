@@ -245,7 +245,7 @@ def confirm_rule(command: str) -> str:
     return ""
 
 
-def _segment_safe(tokens: list[str], user_safe) -> bool:
+def _segment_safe(tokens: list[str], user_safe, cwd: str | None = None) -> bool:
     if not tokens:
         return True
     base = tokens[0]
@@ -265,13 +265,13 @@ def _segment_safe(tokens: list[str], user_safe) -> bool:
                                                          "--compute-mode"))
                                            for t in tokens[1:]):
         return True
-    if is_readonly_command(shlex.join(tokens)):
+    if is_readonly_command(shlex.join(tokens), cwd):
         return True
     return any(_prefix_match(tokens, prefix) for _line, prefix in user_safe
                if isinstance(prefix, list))
 
 
-def is_safe_command(command: str, user_safe=()) -> bool:
+def is_safe_command(command: str, user_safe=(), cwd: str | None = None) -> bool:
     """True if every part of the command line may run without asking.
 
     The structural guards come first and apply to user entries too: no output
@@ -282,28 +282,29 @@ def is_safe_command(command: str, user_safe=()) -> bool:
         return False
     if any(marker in cmd for marker in ("$(", "`", "<(", ">(")):
         return False
-    if touches_sensitive_path(cmd):
+    if touches_sensitive_path(cmd, cwd):
         return False
     compiled = _compile_user(user_safe)
     segments = _segments(cmd)
     if not segments:
         return False
-    if all(_segment_safe(tokens, compiled) for tokens in segments):
+    if all(_segment_safe(tokens, compiled, cwd) for tokens in segments):
         return True
     # A user regex may vouch for the whole line.
     return any(isinstance(m, re.Pattern) and m.fullmatch(cmd) for _l, m in compiled)
 
 
-def classify(command: str, user_blocked=(), user_safe=()) -> Verdict:
+def classify(command: str, user_blocked=(), user_safe=(), cwd: str | None = None) -> Verdict:
     """The tier a command falls in. Order matters: blocked beats everything,
-    and a user's "safe" entry never outranks a confirm rule."""
+    and a user's "safe" entry never outranks a confirm rule. ``cwd`` is where
+    the command will run (for the paths a recursive search would walk)."""
     rule = blocked_rule(command, user_blocked)
     if rule:
         return Verdict("blocked", rule)
     rule = confirm_rule(command)
     if rule:
         return Verdict("confirm", rule)
-    if is_safe_command(command, user_safe):
+    if is_safe_command(command, user_safe, cwd):
         return Verdict("safe")
     return Verdict("normal")
 

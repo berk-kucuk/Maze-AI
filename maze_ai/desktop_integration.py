@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import xmlsafe
 from .i18n import tr
 
 log = logging.getLogger(__name__)
@@ -152,7 +153,7 @@ def _thunar_install(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         try:
-            tree = ET.parse(path)
+            tree = xmlsafe.parse(path)
             root = tree.getroot()
         except ET.ParseError:
             root = ET.Element("actions")

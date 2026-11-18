@@ -180,8 +180,25 @@ TURKISH: dict[str, str] = {
         "içeriği indirip bir dosyaya yazıyor",
     "this URL carries data out to a remote server":
         "bu adres uzak bir sunucuya veri taşıyor",
+    "after reading your files this turn, it would send more data out "
+    "in web requests ({detail} characters so far)":
+        "bu turda dosyalarınızı okuduktan sonra web istekleriyle daha fazla veri "
+        "dışarı gönderecek (şimdiye kadar {detail} karakter)",
+    "it would send text it read from your files or commands out ({detail})":
+        "dosyalarınızdan veya komutlardan okuduğu bir metni dışarı gönderecek ({detail})",
     "it touches a sensitive path ({detail})":
         "hassas bir yola dokunuyor ({detail})",
+    "it touches a sensitive path, and what it reads will be sent "
+    "to your model provider ({detail})":
+        "hassas bir yola dokunuyor ve okuduğu içerik model sağlayıcınıza "
+        "gönderilecek ({detail})",
+    "it photographs your screen and shows the result to the model":
+        "ekranınızın görüntüsünü alıp modele gösteriyor",
+    "it puts a message on your desktop under Maze AI's name":
+        "masaüstünüze Maze AI adıyla bir mesaj koyuyor",
+    "it photographs your screen and sends the picture to your model "
+    "provider ({detail})":
+        "ekranınızın görüntüsünü alıp model sağlayıcınıza gönderiyor ({detail})",
     "this command is destructive and cannot be undone":
         "bu komut yıkıcı ve geri alınamaz",
     "it runs a command on your machine": "makinenizde bir komut çalıştırıyor",

@@ -22,6 +22,8 @@ from pathlib import Path
 
 import requests
 
+from .. import xmlsafe
+
 FEED_URL = "https://archlinux.org/feeds/news/"
 PACMAN_LOG = Path(os.environ.get("MAZE_AI_PACMAN_LOG", "/var/log/pacman.log"))
 CACHE_FILE = (
@@ -52,7 +54,7 @@ def _text(raw: str) -> str:
 
 def parse_feed(xml_text: str) -> list[NewsItem]:
     items: list[NewsItem] = []
-    root = ET.fromstring(xml_text)
+    root = xmlsafe.fromstring(xml_text)
     for node in root.iter("item"):
         try:
             published = parsedate_to_datetime(node.findtext("pubDate") or "")

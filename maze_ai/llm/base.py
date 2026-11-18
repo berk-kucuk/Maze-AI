@@ -29,6 +29,37 @@ Message = dict  # {"role": str, "content": str}
 StreamCallback = Callable[[str], None]
 
 
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+    h = (host or "").strip("[]").lower()
+    if h in ("localhost", "") or h.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def remote_provider(backend) -> str:
+    """Who receives what the model is shown — "" when it stays on this machine.
+
+    Gemini is always Google; an OpenAI-compatible endpoint or an Ollama server
+    is remote unless its address is this machine's loopback (a local LM Studio,
+    llama.cpp or Ollama). Used to say so before a sensitive read: on a hosted
+    model, the file's contents leave the machine with the next request.
+    """
+    from urllib.parse import urlsplit
+    name = getattr(backend, "name", "")
+    if name == "gemini":
+        return "Google (Gemini)"
+    url = getattr(backend, "base_url", None) if name == "openai" else (
+        getattr(backend, "host", None) if name == "ollama" else None)
+    if not url:
+        return ""
+    host = urlsplit(url if "://" in url else f"http://{url}").hostname or ""
+    return "" if _is_loopback(host) else host
+
+
 class LLMError(RuntimeError):
     """Raised when a backend cannot produce a completion."""
 
